@@ -52,10 +52,17 @@ function when(iso: string | null): string {
   return new Date(iso).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
 }
 
+function percentLabel(value: unknown): string {
+  const number = Number(value) * 100;
+  return `${number.toFixed(1).replace(".", ",")}%`;
+}
+
 function variantLabel(params: Record<string, unknown>): string {
   if (params.exit !== undefined && params.signal_anchor === undefined) {
     const exit = String(params.exit);
-    return exit === "eod" ? "Gap · saída fim do dia" : `Gap · saída ${exit} min`;
+    const hold = exit === "eod" ? "fim do dia" : `${exit} min`;
+    const threshold = params.threshold !== undefined ? `${percentLabel(params.threshold)} · ` : "";
+    return `Gap · ${threshold}${hold}`;
   }
   if (params.range_minutes !== undefined && params.signal_anchor === undefined) {
     return `ORB · ${params.range_minutes} min`;
@@ -68,7 +75,10 @@ function variantLabel(params: Record<string, unknown>): string {
 
 function gridVariants(strategy: string): Record<string, unknown>[] {
   if (strategy === "gap_reversal") {
-    return [{ exit: "15" }, { exit: "30" }, { exit: "eod" }];
+    const thresholds = [0.005, 0.01, 0.015];
+    const core = thresholds.map((threshold) => ({ threshold, exit: "15" }));
+    const extras = ["30", "eod"].flatMap((exit) => thresholds.map((threshold) => ({ threshold, exit })));
+    return [...core, ...extras];
   }
   if (strategy === "opening_range_breakout") {
     return [{ range_minutes: 5 }, { range_minutes: 15 }, { range_minutes: 30 }];
@@ -146,7 +156,8 @@ export function App() {
   const [file, setFile] = useState<File | null>(null);
   const [columnMap, setColumnMap] = useState("");
   const [strategy, setStrategy] = useState("intraday_momentum");
-  const [gapExit, setGapExit] = useState("eod");
+  const [gapExit, setGapExit] = useState("15");
+  const [gapThreshold, setGapThreshold] = useState(0.005);
   const [rangeMinutes, setRangeMinutes] = useState(5);
   const [signalMinutes, setSignalMinutes] = useState(30);
   const [signalAnchor, setSignalAnchor] = useState("session_open");
@@ -279,7 +290,7 @@ export function App() {
       edge_tolerance_minutes: edgeTolerance,
     };
     if (strategy === "gap_reversal") {
-      return { exit: gapExit, ...coverage };
+      return { threshold: gapThreshold, exit: gapExit, ...coverage };
     }
     if (strategy === "opening_range_breakout") {
       return { range_minutes: rangeMinutes, ...coverage };
@@ -436,6 +447,14 @@ export function App() {
             {strategy === "gap_reversal" && (
               <>
                 <label>
+                  Limiar
+                  <select value={gapThreshold} onChange={(event) => setGapThreshold(Number(event.target.value))}>
+                    <option value={0.005}>0,5%</option>
+                    <option value={0.01}>1%</option>
+                    <option value={0.015}>1,5%</option>
+                  </select>
+                </label>
+                <label>
                   Saída
                   <select value={gapExit} onChange={(event) => setGapExit(event.target.value)}>
                     <option value="15">15 minutos</option>
@@ -444,7 +463,7 @@ export function App() {
                   </select>
                 </label>
                 <p className="hint">
-                  Gap = ln(abertura / fechamento anterior). O limiar é fixo: 0,5% no WIN e no índice, 1% nas ações. A entrada é a abertura da primeira barra depois do leilão, e a grade pré-registrada cruza as três saídas.
+                  Gap = ln(abertura / fechamento anterior). Os limiares 0,5%, 1% e 1,5% são os mesmos para WIN e ações. A entrada é o open da barra que começa 1 minuto depois da abertura. O núcleo sai em 15 minutos; 30 minutos e o fim do dia (16:55, antes do leilão) são extras.
                 </p>
                 <label>
                   Quantidade
@@ -463,7 +482,7 @@ export function App() {
                   </select>
                 </label>
                 <p className="hint">
-                  A máxima e a mínima dos primeiros minutos definem a faixa. O primeiro fechamento fora dela entra na barra seguinte, com stop no outro extremo e saída no fim do dia. No máximo uma operação por pregão.
+                  A máxima e a mínima dos primeiros minutos definem a faixa. O primeiro fechamento fora dela entra na barra seguinte, com stop no outro extremo. A saída forçada é às 16:55, no fim do contínuo antes do leilão do à vista, no WIN e nas ações. O núcleo é a faixa de 5 minutos; 15 e 30 minutos são extras. No máximo uma operação por pregão.
                 </p>
                 <label>
                   Quantidade
@@ -676,7 +695,7 @@ export function App() {
             {comparing ? "Comparando variantes…" : strategy === "intraday_momentum" ? "Comparar sinal e janela" : "Rodar a grade pré-registrada"}
           </button>
           <p className="hint">
-            WIN: R$ 0,50 por contrato por lado e 1 tick (5 pontos = R$ 1,00). Ação: 0,023% por lado sobre o valor negociado e 1 tick de R$ 0,01. A grade do momentum tem oito variantes. Gap e ORB têm três cada. O Sharpe deflacionado de cada linha usa pelo menos esse total.
+            WIN: R$ 0,50 por contrato por lado e 1 tick (5 pontos = R$ 1,00). Ação: 0,023% por lado sobre o valor negociado e 1 tick de R$ 0,01. O núcleo do gap tem três limiares com saída de 15 minutos; o do ORB é a faixa de 5 minutos. Os extras (saídas de 30 minutos e fim do dia, faixas de 15 e 30) entram no mesmo N.
           </p>
         </form>
         <section className="panel">

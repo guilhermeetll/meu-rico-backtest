@@ -41,7 +41,7 @@ def _range() -> list[dict]:
 
 
 def _tail(close: float = 105, high: float = 106, low: float = 104) -> dict:
-    return _bar(DAY, 18, 24, close, high, low, close)
+    return _bar(DAY, 16, 54, close, high, low, close)
 
 
 def test_breakout_up_buys_on_the_next_open_and_breakout_down_sells():
@@ -63,7 +63,7 @@ def test_breakout_up_buys_on_the_next_open_and_breakout_down_sells():
     assert up[0].entry_price == 112
     assert up[0].entry_time.minute == 6
     assert up[0].exit_price == 105
-    assert up[0].exit_time.hour == 18 and up[0].exit_time.minute == 25
+    assert up[0].exit_time.hour == 16 and up[0].exit_time.minute == 55
     assert len(down) == 1
     assert down[0].direction == -1
     assert down[0].entry_price == 98
@@ -113,7 +113,7 @@ def test_at_most_one_trade_and_the_last_bar_cannot_be_entered():
     last, _, skipped = _generate([
         *_range(),
         _bar(DAY, 9, 5, 105, 106, 104, 105),
-        _bar(DAY, 18, 24, 120, 120, 120, 120),
+        _bar(DAY, 16, 54, 120, 120, 120, 120),
     ])
     assert len(two) == 1
     assert two[0].direction == 1

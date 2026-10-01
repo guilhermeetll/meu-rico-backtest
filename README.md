@@ -195,13 +195,15 @@ Pular o dia porque a janela da operação está incompleta só acontece no backt
 
 As duas grades seguintes estão pré-registradas em `docs/preregistro.md`, junto com as oito do momentum. O arquivo fixa as regras antes do resultado; a tela e a API só escolhem o que está nessa grade.
 
-A reversão do gap de abertura (Ceretta e Da Costa, 2017, *Economics Bulletin* 37(4)) usa gap = ln(abertura / fechamento anterior). No WIN o fechamento anterior é o do mesmo vencimento. Gap no limiar ou além vende; no limiar negativo ou além, compra. O limiar é 0,5% no WIN e no índice e 1% nas ações, e não entra na grade. A entrada é a abertura da primeira barra depois do leilão. As três saídas são 15 minutos, 30 minutos e o fim do pregão regular, antes do leilão de fechamento.
+A reversão do gap de abertura (Ceretta e Da Costa, 2017, *Economics Bulletin* 37(4)) usa gap = ln(abertura / fechamento anterior). No WIN o fechamento anterior é o do mesmo vencimento. Gap no limiar ou além vende; no limiar negativo ou além, compra. Os limiares são 0,5%, 1% e 1,5%, os mesmos para WIN e ações. A entrada é o open da barra que começa 1 minuto depois da abertura da sessão regular. No 1 minuto isso é 09:01 no WIN e 10:01 na ação; se essa barra não existe, o pregão é pulado. No 5 minutos a entrada é a primeira barra a partir desse instante ainda dentro da tolerância de 5 minutos (a das 10:05).
 
-O rompimento da faixa de abertura é o controle. A faixa é a máxima e a mínima dos primeiros 5, 15 ou 30 minutos. O primeiro fechamento fora dela define o lado, a entrada é a barra seguinte e o stop fica no outro extremo. Sem alvo: o resto sai no fim do pregão regular. No máximo uma operação por dia.
+O núcleo sai 15 minutos depois da entrada, no open da barra que começa nesse instante. Os extras saem em 30 minutos ou no fim do dia. Fim do dia, nas ações e no WIN, é o fim do contínuo antes do leilão do à vista: 16:55 no pregão ordinário vigente.
+
+O rompimento da faixa de abertura é o controle. O núcleo usa a faixa dos primeiros 5 minutos. Os extras usam 15 e 30 minutos. O primeiro fechamento fora dela define o lado, a entrada é a barra seguinte e o stop fica no outro extremo. Sem alvo: a saída forçada é às 16:55, o mesmo relógio do fim do dia do gap, no WIN e nas ações. No máximo uma operação por dia.
 
 As duas rodam no WIN e em ações, com B3, Yahoo ou CSV. Na tela, o seletor de estratégia troca os campos e o botão da grade. O id na API é `gap_reversal` ou `opening_range_breakout`.
 
-O comando abaixo grava CSV e Markdown. N do Sharpe deflacionado é o número de linhas da grade, ou `--n-trials` se for maior (o acumulado do projeto). Um valor menor não reduz N. O catálogo das três grades soma 14.
+O comando abaixo grava CSV e Markdown. O relatório lista o núcleo e depois os extras. Por instrumento, o núcleo tem 4 linhas e os extras 8. N do Sharpe deflacionado é a soma das duas, vezes ativos e fontes, ou `--n-trials` se for maior (o catálogo do projeto soma 20). Um valor menor não reduz N. Cada linha traz o t-stat por trade e o t-stat da média diária dos trades.
 
 ```bash
 cd backend

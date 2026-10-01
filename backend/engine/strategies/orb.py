@@ -20,11 +20,11 @@ from engine.sessions import session_bounds
 from engine.strategies.base import ParamField, Strategy
 from engine.strategies.common import (
     at,
+    cash_call_start,
     contract_of,
     coverage_params,
     incomplete_window,
     quantity_of,
-    regular_close,
     span,
     unique,
 )
@@ -49,7 +49,8 @@ class OpeningRangeBreakoutStrategy(Strategy):
         "A faixa é a máxima e a mínima dos primeiros 5, 15 ou 30 minutos. "
         "O primeiro fechamento fora da faixa define a direção, e a entrada é "
         "a abertura da barra seguinte. O stop fica no outro extremo. Sem alvo: "
-        "o que não parar sai no fim do pregão regular. No máximo uma operação por dia."
+        "o que não parar sai quando começa o leilão do à vista, às 16:55 no pregão "
+        "ordinário, no WIN e nas ações. No máximo uma operação por dia."
     )
 
     def param_schema(self) -> list[ParamField]:
@@ -115,8 +116,7 @@ class OpeningRangeBreakoutStrategy(Strategy):
             contract = series[0] if series else contract_of(ordered)
             open_t, _ = session_bounds(instrument.family, day, contract)
             session_open = at(day, open_t, tz)
-            close_t = regular_close(instrument.family, day, contract)
-            session_close = at(day, close_t, tz)
+            session_close = at(day, cash_call_start(day), tz)
             range_end = session_open + timedelta(minutes=range_minutes)
             if range_end >= session_close:
                 warnings.append(

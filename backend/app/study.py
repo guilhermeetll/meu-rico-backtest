@@ -19,7 +19,8 @@ from data.csv_loader import CsvBarsAdapter
 from data.yahoo import YahooFinanceAdapter
 from engine.costs import CostModel
 from engine.instruments import resolve_instrument
-from engine.strategies.preregistry import CATALOG_TRIALS, variants_for
+from engine.metrics import daily_means, student_t
+from engine.strategies.preregistry import CATALOG_TRIALS, is_core, variants_for
 from engine.strategies.registry import get_strategy
 from engine.study import run_study, trial_count
 from app.service import sample_csv_path
@@ -68,7 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     strategies = _items(args.strategies)
     for strategy_id in strategies:
         variants_for(strategy_id)
-    planned = len(symbols) * len(sources) * sum(len(variants_for(item)) for item in strategies)
+    core_planned, extra_planned = _split_counts(strategies, symbols, sources)
+    planned = core_planned + extra_planned
     if planned < 1:
         print("A grade ficou vazia.", file=sys.stderr)
         return 2
@@ -112,14 +114,21 @@ def main(argv: list[str] | None = None) -> int:
                 for params, result in results:
                     signal_skips = sum(1 for item in result.skipped if item.window == "signal")
                     trade_skips = sum(1 for item in result.skipped if item.window == "trade")
+                    stats = _trade_stats(result, instrument.point_value)
                     rows.append(
                         {
+                            "block": "núcleo" if is_core(strategy_id, params) else "extra",
                             "strategy": strategy_id,
                             "symbol": instrument.symbol,
                             "source": source,
                             "timeframe": timeframe,
                             "variant": _variant_label(strategy_id, params),
                             "trades": result.metrics.n_trades,
+                            "net_pnl": stats["net_pnl"],
+                            "mean_net_return": stats["mean_net_return"],
+                            "win_rate": result.metrics.win_rate,
+                            "t_stat_trade": stats["t_stat_trade"],
+                            "t_stat_day": stats["t_stat_day"],
                             "net_after_tax": result.metrics.net_pnl_after_tax,
                             "sharpe": result.metrics.sharpe,
                             "deflated_sharpe": result.metrics.deflated_sharpe,
@@ -127,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
                             "skipped_signal": signal_skips,
                             "skipped_trade": trade_skips,
                             "sessions": result.metrics.n_sessions,
+                            "observations": stats["observations"],
+                            "wins": stats["wins"],
                         }
                     )
 
@@ -135,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     md_path = stem.with_suffix(".md")
     _write_csv(csv_path, rows)
     md_path.write_text(
-        _markdown(rows, failures, trials, planned, start, end),
+        _markdown(rows, failures, trials, core_planned, extra_planned, start, end),
         encoding="utf-8",
     )
     print(md_path.read_text(encoding="utf-8"))
@@ -165,10 +176,48 @@ def _load(source: str, symbol: str, start: date, end: date, timeframe: str, csv_
     raise ValueError(f"Fonte desconhecida: {source}. Use b3, yahoo ou csv.")
 
 
+def _split_counts(strategies: list[str], symbols: list[str], sources: list[str]) -> tuple[int, int]:
+    core = 0
+    extra = 0
+    for strategy_id in strategies:
+        for params in variants_for(strategy_id):
+            if is_core(strategy_id, params):
+                core += 1
+            else:
+                extra += 1
+    factor = len(symbols) * len(sources)
+    return core * factor, extra * factor
+
+
+def _trade_stats(result, point_value: float) -> dict:
+    observations: list[tuple[date, float]] = []
+    wins = 0
+    net = 0.0
+    for trade in result.trades:
+        net += float(trade.pnl)
+        if trade.pnl > 0:
+            wins += 1
+        notional = float(trade.entry_price) * point_value * trade.quantity
+        if notional == 0:
+            continue
+        observations.append((trade.session_date, float(trade.pnl) / notional))
+    returns = [value for _, value in observations]
+    mean = float(sum(returns) / len(returns)) if returns else None
+    return {
+        "net_pnl": net,
+        "mean_net_return": mean,
+        "t_stat_trade": student_t(returns),
+        "t_stat_day": student_t(daily_means(observations)),
+        "observations": observations,
+        "wins": wins,
+    }
+
+
 def _variant_label(strategy_id: str, params: dict) -> str:
     if strategy_id == "gap_reversal":
-        exit_mode = str(params.get("exit", "eod"))
-        return "fim do dia" if exit_mode == "eod" else f"{exit_mode} min"
+        exit_mode = str(params.get("exit", "15"))
+        exit_name = "fim do dia" if exit_mode == "eod" else f"{exit_mode} min"
+        return f"{_threshold_label(params)} · {exit_name}"
     if strategy_id == "opening_range_breakout":
         return f"{params.get('range_minutes')} min"
     anchor = "fechamento anterior" if params.get("signal_anchor") == "prior_close" else "abertura"
@@ -177,40 +226,118 @@ def _variant_label(strategy_id: str, params: dict) -> str:
     return f"{anchor} · fim na abertura do {end} · {window}"
 
 
-def _markdown(rows: list[dict], failures: list[str], trials: int, planned: int, start: date, end: date) -> str:
+def _markdown(
+    rows: list[dict],
+    failures: list[str],
+    trials: int,
+    core_planned: int,
+    extra_planned: int,
+    start: date,
+    end: date,
+) -> str:
     lines = [
         f"# Estudo {start.isoformat()} a {end.isoformat()}",
         "",
-        f"N do Sharpe deflacionado: **{trials}**. Linhas pedidas na grade: {planned}. "
-        f"Catálogo pré-registrado do projeto: {CATALOG_TRIALS}.",
+        f"N do núcleo: **{core_planned}**. N dos extras: **{extra_planned}**. "
+        f"N do Sharpe deflacionado: **{trials}** (núcleo + extras, salvo um `--n-trials` maior). "
+        f"Catálogo do projeto: {CATALOG_TRIALS}.",
         "",
-        "| Estratégia | Ativo | Fonte | Variante | Operações | Líquido de IR | Sharpe | Sharpe deflacionado | N | Sinal pulado | Operação pulada | Pregões |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "A média líquida, a taxa de acerto e os t-stats são depois dos custos e antes do IR. "
+        "O t-stat diário usa a média dos trades de cada pregão.",
+        "",
     ]
+    lines.extend(_section("Núcleo", [row for row in rows if row["block"] == "núcleo"]))
+    lines.extend(_section("Extras", [row for row in rows if row["block"] == "extra"]))
+    if failures:
+        lines.extend(["## Carga que não rodou", ""])
+        lines.extend(f"- {item}" for item in failures)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _section(title: str, rows: list[dict]) -> list[str]:
+    lines = [
+        f"## {title}",
+        "",
+        "| Estratégia | Ativo | Variante | Operações | Média líquida | Acerto | t por trade | t diário | Líquido de custos | Líquido de IR | Sharpe | Sharpe deflacionado | Sinal pulado | Operação pulada | Pregões |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    if not rows:
+        lines.append("| — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |")
     for row in rows:
+        lines.append(_row_line(row))
+    lines.extend(["", f"### {title} agregado", ""])
+    lines.append("| Variante | Operações | Média líquida | Acerto | t por trade | t diário | Líquido de custos |")
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    pooled = _pooled(rows)
+    if not pooled:
+        lines.append("| — | — | — | — | — | — | — |")
+    for item in pooled:
         lines.append(
-            "| {strategy} | {symbol} | {source} | {variant} | {trades} | {net} | {sharpe} | {dsr} | {n} | {signal} | {trade} | {sessions} |".format(
-                strategy=row["strategy"],
-                symbol=row["symbol"],
-                source=SOURCE_LABELS.get(row["source"], row["source"]),
-                variant=row["variant"],
-                trades=row["trades"],
-                net=_brl(row["net_after_tax"]),
-                sharpe=_ratio(row["sharpe"]),
-                dsr=_pct(row["deflated_sharpe"]),
-                n=row["n_trials"],
-                signal=row["skipped_signal"],
-                trade=row["skipped_trade"],
-                sessions=row["sessions"],
+            "| {variant} | {trades} | {mean} | {win} | {t_trade} | {t_day} | {net} |".format(
+                variant=item["variant"],
+                trades=item["trades"],
+                mean=_pct(item["mean_net_return"]),
+                win=_pct(item["win_rate"]),
+                t_trade=_ratio(item["t_stat_trade"]),
+                t_day=_ratio(item["t_stat_day"]),
+                net=_brl(item["net_pnl"]),
             )
         )
-    if not rows:
-        lines.append("| — | — | — | — | — | — | — | — | — | — | — | — |")
-    if failures:
-        lines.extend(["", "## Carga que não rodou", ""])
-        lines.extend(f"- {item}" for item in failures)
     lines.append("")
-    return "\n".join(lines)
+    return lines
+
+
+def _row_line(row: dict) -> str:
+    return (
+        "| {strategy} | {symbol} | {variant} | {trades} | {mean} | {win} | {t_trade} | {t_day} | {net} | {tax} | {sharpe} | {dsr} | {signal} | {trade} | {sessions} |".format(
+            strategy=row["strategy"],
+            symbol=row["symbol"],
+            variant=row["variant"],
+            trades=row["trades"],
+            mean=_pct(row["mean_net_return"]),
+            win=_pct(row["win_rate"]),
+            t_trade=_ratio(row["t_stat_trade"]),
+            t_day=_ratio(row["t_stat_day"]),
+            net=_brl(row["net_pnl"]),
+            tax=_brl(row["net_after_tax"]),
+            sharpe=_ratio(row["sharpe"]),
+            dsr=_pct(row["deflated_sharpe"]),
+            signal=row["skipped_signal"],
+            trade=row["skipped_trade"],
+            sessions=row["sessions"],
+        )
+    )
+
+
+def _pooled(rows: list[dict]) -> list[dict]:
+    order: list[str] = []
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        label = f"{row['strategy']} · {row['variant']}"
+        if label not in groups:
+            order.append(label)
+            groups[label] = []
+        groups[label].append(row)
+    pooled = []
+    for label in order:
+        group = groups[label]
+        observations = [item for row in group for item in row["observations"]]
+        returns = [value for _, value in observations]
+        trades = sum(int(row["trades"]) for row in group)
+        wins = sum(int(row["wins"]) for row in group)
+        pooled.append(
+            {
+                "variant": label,
+                "trades": trades,
+                "mean_net_return": float(sum(returns) / len(returns)) if returns else None,
+                "win_rate": (wins / trades) if trades else None,
+                "t_stat_trade": student_t(returns),
+                "t_stat_day": student_t(daily_means(observations)),
+                "net_pnl": float(sum(row["net_pnl"] for row in group)),
+            }
+        )
+    return pooled
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -219,8 +346,14 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         "symbol",
         "source",
         "timeframe",
+        "block",
         "variant",
         "trades",
+        "mean_net_return",
+        "win_rate",
+        "t_stat_trade",
+        "t_stat_day",
+        "net_pnl",
         "net_after_tax",
         "sharpe",
         "deflated_sharpe",
@@ -231,10 +364,15 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _threshold_label(params: dict) -> str:
+    number = float(params.get("threshold", 0.005)) * 100
+    return f"{number:.1f}%".replace(".", ",")
 
 
 def _items(value: str) -> list[str]:

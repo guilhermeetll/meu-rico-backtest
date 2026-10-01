@@ -5,20 +5,34 @@ from pathlib import Path
 import pandas as pd
 
 from app.study import main
-from engine.strategies.preregistry import CATALOG_TRIALS, GAP_VARIANTS, MOMENTUM_VARIANTS, ORB_VARIANTS
+from engine.metrics import daily_means, student_t
+from engine.strategies.preregistry import (
+    CATALOG_TRIALS,
+    CORE_PER_INSTRUMENT,
+    EXTRA_PER_INSTRUMENT,
+    GAP_CORE,
+    GAP_EXTRAS,
+    MOMENTUM_VARIANTS,
+    ORB_CORE,
+    ORB_EXTRAS,
+)
 
 
-def test_catalog_is_the_three_pre_registered_grids():
+def test_catalog_splits_the_core_from_the_extras():
     assert len(MOMENTUM_VARIANTS) == 8
-    assert [item["exit"] for item in GAP_VARIANTS] == ["15", "30", "eod"]
-    assert [item["range_minutes"] for item in ORB_VARIANTS] == [5, 15, 30]
-    assert CATALOG_TRIALS == 14
+    assert [item["exit"] for item in GAP_CORE] == ["15", "15", "15"]
+    assert [item["threshold"] for item in GAP_CORE] == [0.005, 0.01, 0.015]
+    assert len(GAP_EXTRAS) == 6
+    assert ORB_CORE == [{"range_minutes": 5}]
+    assert [item["range_minutes"] for item in ORB_EXTRAS] == [15, 30]
+    assert CORE_PER_INSTRUMENT == 4
+    assert EXTRA_PER_INSTRUMENT == 8
+    assert CATALOG_TRIALS == 20
     text = Path("/workspace/docs/preregistro.md").read_text(encoding="utf-8")
-    assert "14" in text
-    assert "gap_reversal" not in text or "Ceretta" in text
-    assert "Ceretta" in text
-    assert "`15`, `30` e `eod`" in text
-    assert "5, 15, 30" in text or "5, 15 e 30" in text
+    assert "Núcleo" in text
+    assert "Extras" in text
+    assert "16:55" in text
+    assert "0,5%, 1%, 1,5%" in text
 
 
 def test_cli_writes_the_grid_and_keeps_a_larger_n(tmp_path: Path):
@@ -38,11 +52,25 @@ def test_cli_writes_the_grid_and_keeps_a_larger_n(tmp_path: Path):
     ])
     assert code == 0
     table = pd.read_csv(out.with_suffix(".csv"))
-    assert list(table["variant"]) == ["15 min", "30 min", "fim do dia"]
+    assert list(table["variant"])[:3] == ["0,5% · 15 min", "1,0% · 15 min", "1,5% · 15 min"]
     assert set(table["n_trials"]) == {14}
-    assert int(table.loc[table["variant"] == "fim do dia", "trades"].iloc[0]) == 1
+    eod = table[table["variant"].str.contains("fim do dia")]
+    assert len(eod) == 3
+    assert set(eod["trades"]) == {1}
     markdown = out.with_suffix(".md").read_text(encoding="utf-8")
+    assert "N do núcleo: **3**" in markdown
+    assert "N dos extras: **6**" in markdown
     assert "N do Sharpe deflacionado: **14**" in markdown
+    assert markdown.index("## Núcleo") < markdown.index("## Extras")
+
+
+def test_daily_t_stat_collapses_trades_from_the_same_session():
+    same_day = date(2026, 9, 17)
+    other = date(2026, 9, 18)
+    per_trade = student_t([0.01, 0.03, -0.02])
+    per_day = student_t(daily_means([(same_day, 0.01), (same_day, 0.03), (other, -0.02)]))
+    assert per_trade != per_day
+    assert daily_means([(same_day, 0.01), (same_day, 0.03)]) == [0.02]
 
 
 def _write_equity_csv(path: Path) -> None:

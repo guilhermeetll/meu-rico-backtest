@@ -155,6 +155,17 @@ def unique(items: list[str]) -> list[str]:
     return out
 
 
+def cash_call_start(day) -> time:
+    """When the cash closing call starts.
+
+    Continuous trading ends here for stocks and for the WIN. On an ordinary
+    session in the current calendar that is 16:55. Ash Wednesday moves it
+    to 17:55. It is not the WIN session close at 18:25.
+    """
+    _, call_start, _ = cash_session(day)
+    return call_start
+
+
 def regular_close(family: str, day, contract: str | None) -> time:
     """Last instant of the regular session, before the closing auction.
 
