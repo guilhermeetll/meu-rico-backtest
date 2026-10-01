@@ -1,4 +1,4 @@
-import type { BacktestResult, HistoryItem } from "./types";
+import type { BacktestResult, HistoryItem, StudyResult } from "./types";
 
 async function errorMessage(response: Response): Promise<string> {
   const body = await response.json().catch(() => null);
@@ -27,6 +27,16 @@ export async function listBacktests(): Promise<HistoryItem[]> {
 
 export async function getBacktest(id: string): Promise<BacktestResult> {
   const response = await fetch(`/api/backtests/${id}`);
+  if (!response.ok) throw new Error(await errorMessage(response));
+  return response.json();
+}
+
+export async function runStudy(payload: unknown): Promise<StudyResult> {
+  const response = await fetch("/api/studies", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
   if (!response.ok) throw new Error(await errorMessage(response));
   return response.json();
 }

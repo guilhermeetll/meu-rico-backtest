@@ -8,12 +8,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import BacktestRun
-from app.schemas import BacktestInput
-from app.service import execute_backtest, sample_csv_path, stamp, upload_dir
+from app.schemas import BacktestInput, StudyInput
+from app.service import execute_backtest, execute_study, sample_csv_path, stamp, upload_dir
 from data.b3 import B3TradesAdapter
 from data.csv_loader import CsvBarsAdapter
 from data.yahoo import YahooFinanceAdapter
-from engine.instruments import WIN
+from engine.instruments import EQUITY, WIN
 from engine.strategies.registry import list_strategies
 
 router = APIRouter(prefix="/api")
@@ -47,8 +47,19 @@ def instruments():
             "tick_size": WIN.tick_size,
             "tick_value": WIN.tick_value,
             "default_fee_per_side": WIN.default_fee_per_side,
+            "default_fee_rate": WIN.default_fee_rate,
             "default_slippage_ticks": WIN.default_slippage_ticks,
-        }
+        },
+        {
+            "symbol": "ACAO",
+            "label": "Ação à vista",
+            "point_value": EQUITY.point_value,
+            "tick_size": EQUITY.tick_size,
+            "tick_value": EQUITY.tick_value,
+            "default_fee_per_side": EQUITY.default_fee_per_side,
+            "default_fee_rate": EQUITY.default_fee_rate,
+            "default_slippage_ticks": EQUITY.default_slippage_ticks,
+        },
     ]
 
 
@@ -111,6 +122,14 @@ def create_backtest(payload: BacktestInput, db: Session = Depends(get_db)):
     db.add(row)
     db.commit()
     return body
+
+
+@router.post("/studies")
+def create_study(payload: StudyInput):
+    try:
+        return execute_study(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/backtests")

@@ -86,6 +86,16 @@ textarea { min-height: 68px; resize: vertical; }
 
 .run:disabled { opacity: 0.6; cursor: progress; }
 
+.secondary {
+  width: 100%;
+  margin-top: 8px;
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+
 .hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
 
 .error {

@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from engine.costs import CostModel, apply_costs
-from engine.instruments import WIN, resolve_instrument
+from engine.instruments import EQUITY_FEE_RATE, WIN, resolve_instrument
 from engine.models import RawTrade
 
 
@@ -60,6 +60,58 @@ def test_costs_reject_negative_inputs():
         CostModel(fee_per_side=-1)
     with pytest.raises(ValueError):
         CostModel(slippage_ticks=-0.1)
+    with pytest.raises(ValueError):
+        CostModel(fee_rate=-0.01)
+
+
+def test_equity_default_is_percentage_fee_plus_one_tick():
+    spec = resolve_instrument("PETR4")
+    assert spec.tick_size == 0.01
+    assert spec.tick_value == pytest.approx(0.01)
+    assert spec.point_value == 1.0
+    assert spec.default_fee_per_side == 0.0
+    assert spec.default_fee_rate == pytest.approx(EQUITY_FEE_RATE)
+    assert spec.default_fee_rate == pytest.approx(0.00023)
+    assert spec.default_slippage_ticks == 1.0
+    assert resolve_instrument("WINQ26").default_fee_rate == 0.0
+    assert resolve_instrument("WINQ26").default_fee_per_side == 0.50
+
+    costs = CostModel(
+        fee_per_side=spec.default_fee_per_side,
+        slippage_ticks=spec.default_slippage_ticks,
+        fee_rate=spec.default_fee_rate,
+    )
+    trade = apply_costs(
+        RawTrade(
+            session_date=date(2026, 9, 17),
+            direction=1,
+            quantity=100,
+            entry_time=datetime(2026, 9, 17, 16, 25),
+            exit_time=datetime(2026, 9, 17, 16, 55),
+            entry_price=10.00,
+            exit_price=10.50,
+            signal_return=0.01,
+        ),
+        spec,
+        costs,
+        "PETR4",
+    )
+    # One tick of R$ 0.01 adverse on each side. Gross is on the raw prices.
+    assert trade.entry_price_effective == pytest.approx(10.01)
+    assert trade.exit_price_effective == pytest.approx(10.49)
+    assert trade.gross_pnl == pytest.approx(50.0)
+    assert trade.slippage_cost == pytest.approx(2.0)
+    expected_fees = 0.00023 * (10.01 * 100 + 10.49 * 100)
+    assert trade.fees == pytest.approx(expected_fees)
+    assert trade.pnl == pytest.approx(48.0 - expected_fees)
+
+
+def test_percentage_fee_is_charged_on_a_short_too():
+    spec = resolve_instrument("VALE3")
+    costs = CostModel(fee_per_side=0.0, slippage_ticks=0, fee_rate=0.00023)
+    trade = apply_costs(_raw(-1, 20.0, 19.0), spec, costs, "VALE3")
+    assert trade.fees == pytest.approx(0.00023 * (20.0 + 19.0))
+    assert trade.slippage_cost == 0
 
 
 def test_zero_costs_keep_gross_pnl():

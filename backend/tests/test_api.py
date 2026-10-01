@@ -71,3 +71,37 @@ def test_backtest_round_trip_and_history(tmp_path: Path, monkeypatch):
         detail = client.get(f"/api/backtests/{body['id']}")
         assert detail.status_code == 200
         assert detail.json()["metrics"]["n_trades"] == 2
+
+
+def test_study_counts_variants_as_deflated_sharpe_trials(tmp_path: Path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        created = client.post(
+            "/api/studies",
+            json={
+                "strategy": "intraday_momentum",
+                "symbol": "WIN",
+                "data_source": "csv",
+                "timeframe": "1min",
+                "start": "2026-09-17",
+                "end": "2026-09-18",
+                "csv_source": "example",
+                "strategy_params": {"signal_minutes": 30, "trade_minutes": 30, "threshold": 0},
+                "costs": {"fee_per_side": 0.5, "slippage_ticks": 1, "fee_rate": 0},
+                "n_trials": 1,
+                "variants": [
+                    {"signal_anchor": "session_open", "trade_window": "session_close"},
+                    {"signal_anchor": "prior_close", "trade_window": "before_cash_auction"},
+                ],
+            },
+        )
+        assert created.status_code == 200, created.text
+        body = created.json()
+        assert body["n_variants"] == 2
+        assert body["n_trials"] == 2
+        assert all(item["metrics"]["n_trials"] == 2 for item in body["variants"])
+        assert "N=2" in body["variants"][0]["notes"][2] or any("N=2" in note for note in body["variants"][0]["notes"])
+        instruments = client.get("/api/instruments").json()
+        equity = next(item for item in instruments if item["symbol"] == "ACAO")
+        assert equity["tick_size"] == 0.01
+        assert equity["default_fee_rate"] == 0.00023
+        assert equity["default_slippage_ticks"] == 1
