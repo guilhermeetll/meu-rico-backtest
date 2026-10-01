@@ -7,7 +7,7 @@ import pandas as pd
 from engine.instruments import InstrumentSpec
 from engine.models import RawTrade
 from engine.series import contracts_of, return_versus_prior_close
-from engine.sessions import cash_auction_window, cash_session, session_bounds
+from engine.sessions import cash_auction_window, cash_session, is_ash_wednesday, session_bounds
 from engine.strategies.base import ParamField, Strategy
 
 SIGNAL_ANCHORS = ("session_open", "prior_close")
@@ -68,8 +68,8 @@ class IntradayMomentumStrategy(Strategy):
                 help=(
                     "session_open encerra o sinal signal_minutes depois da abertura do ativo. "
                     "cash_open encerra signal_minutes depois da abertura do mercado à vista, "
-                    "no calendário da B3 (10:30 com os 30 minutos de hoje; 11:30 quando a "
-                    "abertura do à vista era 11:00). Vale para as duas referências."
+                    "no calendário da B3 (10:30 com os 30 minutos de hoje; 13:30 na Quarta-feira "
+                    "de Cinzas; 11:30 quando a abertura do à vista era 11:00). Vale para as duas referências."
                 ),
             ),
             ParamField("trade_minutes", "Janela da operação (minutos)", "int", 30, min=1, max=400,
@@ -83,8 +83,8 @@ class IntradayMomentumStrategy(Strategy):
                 help=(
                     "session_close opera nos últimos trade_minutes até o fechamento configurado. "
                     "before_cash_auction é a meia hora contínua que termina quando começa o "
-                    "leilão de fechamento do à vista. O relógio segue o calendário: 16:25–16:55 "
-                    "quando o à vista fecha às 17:00 e 17:25–17:55 quando fecha às 18:00."
+                    "leilão de fechamento do à vista. De out/2023 a set/2026 isso é 16:25–16:55 "
+                    "também no inverno. Na Quarta-feira de Cinzas o leilão começa às 17:55."
                 ),
             ),
             ParamField("threshold", "Limiar do retorno", "float", 0.0, step=0.0001,
@@ -94,6 +94,16 @@ class IntradayMomentumStrategy(Strategy):
                        help="HH:MM ou auto para o calendário do ativo."),
             ParamField("session_close", "Fechamento", "string", "auto",
                        help="HH:MM ou auto. Define o fim da operação quando a janela é session_close."),
+            ParamField(
+                "skip_ash_wednesday",
+                "Pular Quarta-feira de Cinzas",
+                "bool",
+                True,
+                help=(
+                    "O pregão abre às 13:00. Ligado, o dia é pulado. Desligado, o sinal "
+                    "pela abertura do WIN e o sinal pela abertura do à vista usam essa abertura."
+                ),
+            ),
         ]
 
     def generate(self, bars, params, instrument: InstrumentSpec, bar_minutes: int):
@@ -117,6 +127,7 @@ class IntradayMomentumStrategy(Strategy):
             raise ValueError("A janela da operação deve ser session_close ou before_cash_auction.")
         open_override = str(resolved["session_open"]).strip().lower()
         close_override = str(resolved["session_close"]).strip().lower()
+        skip_ash = _as_bool(resolved["skip_ash_wednesday"])
         bar_delta = timedelta(minutes=bar_minutes)
         warnings: list[str] = []
         trades: list[RawTrade] = []
@@ -124,6 +135,12 @@ class IntradayMomentumStrategy(Strategy):
         frame = bars.sort_values("timestamp")
         tz = frame["timestamp"].dt.tz
         for day, day_bars in frame.groupby(frame["timestamp"].dt.date, sort=True):
+            if skip_ash and is_ash_wednesday(day):
+                warnings.append(
+                    f"{day.isoformat()}: Quarta-feira de Cinzas, abertura às 13:00. "
+                    "Pregão pulado. Desligue skip_ash_wednesday para operar esse dia."
+                )
+                continue
             series = contracts_of(day_bars)
             if len(series) > 1:
                 warnings.append(
@@ -223,6 +240,19 @@ class IntradayMomentumStrategy(Strategy):
                 )
             )
         return trades, _unique(warnings)
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "sim", "on"}:
+        return True
+    if text in {"0", "false", "no", "nao", "não", "off"}:
+        return False
+    raise ValueError("Pular a Quarta-feira de Cinzas deve ser verdadeiro ou falso.")
 
 
 def _contract_of(day_bars) -> str | None:

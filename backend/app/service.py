@@ -9,6 +9,7 @@ from engine.costs import CostModel
 from engine.instruments import resolve_instrument
 from engine.models import BacktestResult, EquityPoint, Metrics, SegmentResult, Trade, WalkForwardResult
 from engine.strategies.registry import get_strategy
+from engine.sessions import calendar_warnings
 from engine.study import run_study
 from engine.walkforward import WalkForwardConfig
 from data.b3 import B3TradesAdapter
@@ -50,7 +51,7 @@ def execute_backtest(payload: BacktestInput) -> dict:
         sample_split=split,
         walk_forward=forward,
     )
-    warnings = list(loaded.warnings) + list(result.warnings)
+    warnings = list(loaded.warnings) + list(result.warnings) + calendar_warnings(payload.start, payload.end)
     return _serialize(payload, instrument, costs, result, warnings)
 
 
@@ -74,7 +75,11 @@ def execute_study(payload: StudyInput) -> dict:
     bodies = []
     for params, result in results:
         adjusted = payload.model_copy(update={"n_trials": trials, "strategy_params": params})
-        warnings = list(loaded.warnings) + list(result.warnings)
+        warnings = (
+            list(loaded.warnings)
+            + list(result.warnings)
+            + calendar_warnings(payload.start, payload.end)
+        )
         bodies.append(_serialize(adjusted, instrument, costs, result, warnings))
     return {
         "n_variants": len(variants),

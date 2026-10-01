@@ -146,21 +146,21 @@ def test_before_cash_auction_trades_from_1625_to_1655():
     assert default[0].exit_price == 100_900
 
 
-def test_before_cash_auction_moves_to_1725_outside_us_dst():
+def test_before_cash_auction_stays_at_1625_in_recent_winters():
     day = date(2026, 1, 15)
     rows = [
         {"timestamp": _stamp(day, 9, 0), "open": 100_000, "high": 100_000, "low": 100_000, "close": 100_000, "volume": 1},
         {"timestamp": _stamp(day, 9, 29), "open": 100_050, "high": 100_050, "low": 100_050, "close": 100_050, "volume": 1},
         {"timestamp": _stamp(day, 16, 25), "open": 100_180, "high": 100_180, "low": 100_180, "close": 100_180, "volume": 1},
+        {"timestamp": _stamp(day, 16, 54), "open": 100_240, "high": 100_240, "low": 100_240, "close": 100_250, "volume": 1},
         {"timestamp": _stamp(day, 17, 25), "open": 100_200, "high": 100_200, "low": 100_200, "close": 100_200, "volume": 1},
-        {"timestamp": _stamp(day, 17, 54), "open": 100_240, "high": 100_240, "low": 100_240, "close": 100_250, "volume": 1},
-        {"timestamp": _stamp(day, 18, 24), "open": 100_900, "high": 100_900, "low": 100_900, "close": 100_900, "volume": 1},
+        {"timestamp": _stamp(day, 17, 54), "open": 100_900, "high": 100_900, "low": 100_900, "close": 100_900, "volume": 1},
     ]
     raw, _ = IntradayMomentumStrategy().generate(_frame(rows), {"trade_window": "before_cash_auction"}, WIN, 1)
     assert len(raw) == 1
-    assert raw[0].entry_time.hour == 17 and raw[0].entry_time.minute == 25
-    assert raw[0].exit_time.hour == 17 and raw[0].exit_time.minute == 55
-    assert raw[0].entry_price == 100_200
+    assert raw[0].entry_time.hour == 16 and raw[0].entry_time.minute == 25
+    assert raw[0].exit_time.hour == 16 and raw[0].exit_time.minute == 55
+    assert raw[0].entry_price == 100_180
     assert raw[0].exit_price == 100_250
 
 
@@ -223,6 +223,58 @@ def test_cash_open_signal_followed_the_11h_open_in_early_2012():
     assert raw[0].signal_return == pytest.approx(102_000 / 100_000 - 1)
     assert raw[0].entry_time.hour == 17 and raw[0].entry_time.minute == 25
     assert raw[0].exit_time.hour == 17 and raw[0].exit_time.minute == 55
+
+
+def _ash_rows(day: date) -> list[dict]:
+    return [
+        {"timestamp": _stamp(day, 9, 0), "open": 90_000, "high": 90_000, "low": 90_000, "close": 90_000, "volume": 1},
+        {"timestamp": _stamp(day, 9, 29), "open": 91_000, "high": 91_000, "low": 91_000, "close": 91_000, "volume": 1},
+        {"timestamp": _stamp(day, 13, 0), "open": 100_000, "high": 100_000, "low": 100_000, "close": 100_000, "volume": 1},
+        {"timestamp": _stamp(day, 13, 29), "open": 102_000, "high": 102_000, "low": 102_000, "close": 102_000, "volume": 1},
+        {"timestamp": _stamp(day, 16, 25), "open": 103_000, "high": 103_000, "low": 103_000, "close": 103_000, "volume": 1},
+        {"timestamp": _stamp(day, 17, 25), "open": 104_000, "high": 104_000, "low": 104_000, "close": 104_000, "volume": 1},
+        {"timestamp": _stamp(day, 17, 54), "open": 105_000, "high": 105_000, "low": 105_000, "close": 105_500, "volume": 1},
+        {"timestamp": _stamp(day, 17, 55), "open": 106_000, "high": 106_000, "low": 106_000, "close": 106_000, "volume": 1},
+        {"timestamp": _stamp(day, 18, 24), "open": 107_000, "high": 107_000, "low": 107_000, "close": 107_000, "volume": 1},
+    ]
+
+
+def test_ash_wednesday_is_skipped_by_default_and_tradable_from_the_real_open():
+    for day in (date(2016, 2, 10), date(2024, 2, 14), date(2025, 3, 5), date(2026, 2, 18)):
+        skipped, warnings = IntradayMomentumStrategy().generate(
+            _frame(_ash_rows(day)),
+            {"signal_end": "cash_open", "trade_window": "before_cash_auction"},
+            WIN,
+            1,
+        )
+        assert skipped == []
+        assert any(day.isoformat() in warning and "Cinzas" in warning for warning in warnings)
+
+        cash, _ = IntradayMomentumStrategy().generate(
+            _frame(_ash_rows(day)),
+            {
+                "signal_end": "cash_open",
+                "trade_window": "before_cash_auction",
+                "skip_ash_wednesday": False,
+            },
+            WIN,
+            1,
+        )
+        assert len(cash) == 1
+        assert cash[0].signal_return == pytest.approx(102_000 / 100_000 - 1)
+        assert cash[0].entry_time.hour == 17 and cash[0].entry_time.minute == 25
+        assert cash[0].exit_time.hour == 17 and cash[0].exit_time.minute == 55
+        assert cash[0].entry_price == 104_000
+
+        opened, _ = IntradayMomentumStrategy().generate(
+            _frame(_ash_rows(day)),
+            {"signal_anchor": "session_open", "signal_end": "session_open", "skip_ash_wednesday": False},
+            WIN,
+            1,
+        )
+        assert len(opened) == 1
+        assert opened[0].signal_return == pytest.approx(102_000 / 100_000 - 1)
+        assert opened[0].entry_time.hour == 17 and opened[0].entry_time.minute == 55
 
 
 def test_custom_session_close_still_sets_the_trade_window():

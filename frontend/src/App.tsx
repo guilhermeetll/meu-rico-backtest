@@ -129,6 +129,7 @@ export function App() {
   const [quantity, setQuantity] = useState(1);
   const [sessionOpen, setSessionOpen] = useState("auto");
   const [sessionClose, setSessionClose] = useState("auto");
+  const [skipAshWednesday, setSkipAshWednesday] = useState(true);
   const [fee, setFee] = useState(0.5);
   const [feePercent, setFeePercent] = useState(0);
   const [slippage, setSlippage] = useState(1);
@@ -228,6 +229,7 @@ export function App() {
         quantity,
         session_open: sessionOpen,
         session_close: sessionClose,
+        skip_ash_wednesday: skipAshWednesday,
       },
       costs: { fee_per_side: fee, slippage_ticks: slippage, fee_rate: feePercent / 100 },
       tax_rate: tax / 100,
@@ -407,7 +409,7 @@ export function App() {
               </select>
             </label>
             <p className="hint">
-              Com 30 minutos, a segunda opção termina às 10:30 hoje. Quando a abertura do à vista era 11:00, termina às 11:30. Vale para a abertura e para o fechamento anterior.
+              Com 30 minutos, a segunda opção termina às 10:30 hoje e às 13:30 na Quarta-feira de Cinzas. Quando a abertura do à vista era 11:00, termina às 11:30. Vale para a abertura e para o fechamento anterior.
             </p>
             <label>
               Janela da operação
@@ -446,8 +448,19 @@ export function App() {
                 <input value={sessionClose} onChange={(event) => setSessionClose(event.target.value)} />
               </label>
             </div>
+            <label className="inline">
+              <input
+                type="checkbox"
+                checked={skipAshWednesday}
+                onChange={(event) => setSkipAshWednesday(event.target.checked)}
+              />
+              Pular Quarta-feira de Cinzas
+            </label>
+            <p className="hint">
+              Nesses dias o à vista e o WIN abrem às 13:00. O padrão é não operar. Se desmarcar, os dois fins de sinal usam essa abertura e terminam às 13:30.
+            </p>
             {tradeWindow === "before_cash_auction" ? (
-              <p className="hint">A meia hora termina quando começa o leilão do à vista. Em setembro/2026 isso é 16:25–16:55; quando o à vista fecha às 18h, a janela passa a 17:25–17:55. Abertura, fechamento e minutos continuam valendo na opção até o fechamento do WIN.</p>
+              <p className="hint">A meia hora termina quando começa o leilão do à vista. De outubro/2023 a setembro/2026, inclusive no inverno, isso é 16:25–16:55. Na Quarta-feira de Cinzas o leilão começa às 17:55, se o dia não for pulado.</p>
             ) : (
               <p className="hint">A entrada é no início dos últimos minutos e a saída é no fechamento informado, ou no horário automático do ativo.</p>
             )}
