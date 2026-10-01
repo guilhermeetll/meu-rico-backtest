@@ -1,0 +1,49 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: backtest
+      POSTGRES_PASSWORD: backtest
+      POSTGRES_DB: backtest
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U backtest -d backtest"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://backtest:backtest@db:5432/backtest
+      B3_DATA_ROOT: /data/b3_ticks
+      B3_META_ROOT: /data/b3_ticks_meta
+      B3_BAR_CACHE_DIR: /data/b3_bars
+      SAMPLE_DATA_PATH: /app/sample_data/win_exemplo_1min.csv
+      UPLOAD_DIR: /data/uploads
+    volumes:
+      # No host, aponte para o histórico original. Exemplo do time:
+      # B3_DATA_HOST=/workspace/quant/dados/b3_ticks
+      # B3_META_HOST=/workspace/quant/dados/b3_ticks_meta
+      - ${B3_DATA_HOST:-./data/b3_ticks}:/data/b3_ticks
+      - ${B3_META_HOST:-./data/b3_ticks_meta}:/data/b3_ticks_meta
+      - b3bars:/data/b3_bars
+      - uploads:/data/uploads
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  b3bars:
+  uploads:
