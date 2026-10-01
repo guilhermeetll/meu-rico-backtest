@@ -34,8 +34,8 @@ Ceretta e Da Costa (2017), *Economics Bulletin* 37(4). Três limiares, a mesma s
 - Fechamento anterior: o da mesma série no pregão anterior. No WIN, nunca o de outro vencimento. Sem esse fechamento, o sinal é pulado com aviso. Isso não é um pregão incompleto.
 - Se gap ≤ −x, compra. Se gap ≥ +x, vende. No meio, não opera.
 - x ∈ {0,5%, 1%, 1,5%}, os três iguais para WIN e ações. `BOVA11` usa os mesmos três.
-- Entrada: open da barra que começa 1 minuto depois do início da sessão regular. No 1 minuto isso é 09:01 no WIN e 10:01 na ação (13:01 na Quarta-feira de Cinzas). Se essa barra não existe, o pregão é pulado (`window=trade`). Não se substitui pela das 09:02.
-- No timeframe mais grosso que 1 minuto essa barra não cabe no relógio. A entrada é então o open da primeira barra cujo início é maior ou igual a esse instante e não passa da tolerância de 5 minutos. No 5 minutos, a barra das 10:00 começa antes do minuto 1 e não é a entrada; a das 10:05 começa quatro minutos depois e ainda cabe na tolerância. A das 10:10 não cabe.
+- Entrada: open da primeira barra cujo início é maior ou igual a 1 minuto depois da abertura da sessão regular, e não passa da tolerância de 5 minutos. Quando a barra das 09:01 existe, ela é a entrada. No WIN o primeiro negócio costuma sair às 09:02 ou 09:03; essa barra ainda cabe e é a entrada. Uma primeira barra depois da tolerância pula o pregão (`window=trade`). Na ação o relógio é 10:01, e na Quarta-feira de Cinzas é 13:01.
+- No timeframe mais grosso que 1 minuto a barra do minuto 1 não cabe no relógio, e vale a mesma regra. No 5 minutos, a barra das 10:00 começa antes do minuto 1 e não é a entrada; a das 10:05 começa quatro minutos depois e ainda cabe na tolerância. A das 10:10 não cabe.
 - Saída do núcleo: 15 minutos depois da entrada, no open da barra que começa nesse instante. No 1 minuto, entrada às 09:01 sai no open das 09:16. No 5 minutos, entrada às 10:05 sai no open das 10:20.
 
 ### ORB

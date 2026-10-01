@@ -59,8 +59,8 @@ class GapReversalStrategy(Strategy):
     label = "Reversão do gap de abertura"
     description = (
         "Gap = ln(abertura / fechamento anterior). Os limiares são 0,5%, 1% "
-        "e 1,5%, iguais para WIN e ações. A entrada é o open da barra que "
-        "começa 1 minuto depois da abertura. O núcleo sai 15 minutos depois; "
+        "e 1,5%, iguais para WIN e ações. A entrada é o open da primeira barra "
+        "a partir de 1 minuto depois da abertura, dentro da tolerância. O núcleo sai 15 minutos depois; "
         "30 minutos e o fim do contínuo, às 16:55 no pregão ordinário, são extras."
     )
 
@@ -165,7 +165,10 @@ class GapReversalStrategy(Strategy):
                 continue
 
             scheduled = session_open + ENTRY_LAG
-            entry_limit = scheduled if bar_minutes <= 1 else scheduled + edge
+            # The 09:01 bar is the entry when it exists. On the WIN the first
+            # print is often 09:02 or 09:03, still inside the same edge
+            # tolerance used for the opening bar. A later print is a skip.
+            entry_limit = scheduled + edge
             entry = _first_between(day_bars, scheduled, entry_limit, session_close)
             if entry is None:
                 reason = (

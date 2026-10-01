@@ -463,7 +463,7 @@ export function App() {
                   </select>
                 </label>
                 <p className="hint">
-                  Gap = ln(abertura / fechamento anterior). Os limiares 0,5%, 1% e 1,5% são os mesmos para WIN e ações. A entrada é o open da barra que começa 1 minuto depois da abertura. O núcleo sai em 15 minutos; 30 minutos e o fim do dia (16:55, antes do leilão) são extras.
+                  Gap = ln(abertura / fechamento anterior). Os limiares 0,5%, 1% e 1,5% são os mesmos para WIN e ações. A entrada é o open da primeira barra a partir de 1 minuto depois da abertura, dentro da tolerância de 5 minutos. O núcleo sai em 15 minutos; 30 minutos e o fim do dia (16:55, antes do leilão) são extras.
                 </p>
                 <label>
                   Quantidade

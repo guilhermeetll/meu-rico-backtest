@@ -159,15 +159,27 @@ def test_entry_is_the_bar_one_minute_after_the_open_and_exit_is_fifteen_minutes_
     assert trade.direction == -1
 
 
-def test_a_missing_09_01_bar_is_not_replaced():
+def test_a_missing_09_01_bar_uses_the_next_print_inside_the_tolerance():
     raw, _, skipped = _generate([
         *_prior(),
         _flat(DAY, 9, 0, 100_000 * math.exp(0.006), "WINV26"),
         _flat(DAY, 9, 2, 100_300, "WINV26"),
         _flat(DAY, 9, 16, 100_100, "WINV26"),
+        _flat(DAY, 9, 17, 100_050, "WINV26"),
     ], {"exit": "15"})
-    assert raw == []
-    assert any(item.window == "trade" and item.session_date == DAY for item in skipped)
+    assert [item for item in skipped if item.session_date == DAY] == []
+    assert len(raw) == 1
+    assert raw[0].entry_time.hour == 9 and raw[0].entry_time.minute == 2
+    assert raw[0].entry_price == 100_300
+    assert raw[0].exit_time.minute == 17
+    assert raw[0].exit_price == 100_050
+    late, _, late_skipped = _generate([
+        *_prior(),
+        _flat(DAY, 9, 0, 100_000 * math.exp(0.006), "WINV26"),
+        _flat(DAY, 9, 7, 100_300, "WINV26"),
+    ], {"exit": "15"})
+    assert late == []
+    assert any(item.window == "trade" and item.session_date == DAY for item in late_skipped)
 
 
 def test_five_minute_bars_skip_the_opening_bar_and_enter_on_the_next_one():
