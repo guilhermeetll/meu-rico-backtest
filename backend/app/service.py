@@ -9,12 +9,13 @@ from engine.costs import CostModel
 from engine.instruments import resolve_instrument
 from engine.models import BacktestResult, EquityPoint, Metrics, SegmentResult, Trade, WalkForwardResult
 from engine.strategies.registry import get_strategy
+from engine.study import run_study
 from engine.walkforward import WalkForwardConfig
 from data.b3 import B3TradesAdapter
 from data.base import DataRequest
 from data.csv_loader import CsvBarsAdapter
 from data.yahoo import YahooFinanceAdapter
-from app.schemas import BacktestInput
+from app.schemas import BacktestInput, StudyInput
 
 TIMEFRAME_MINUTES = {"1min": 1, "5min": 5, "60min": 60}
 SOURCE_LABELS = {"b3": "B3", "yahoo": "Yahoo Finance", "csv": "CSV"}
@@ -34,38 +35,7 @@ def upload_dir() -> Path:
 
 
 def execute_backtest(payload: BacktestInput) -> dict:
-    if payload.end < payload.start:
-        raise ValueError("A data final é anterior à data inicial.")
-    if payload.timeframe not in TIMEFRAME_MINUTES:
-        raise ValueError("Timeframe deve ser 1min, 5min ou 60min.")
-    if payload.n_trials < 1:
-        raise ValueError("O número de configurações testadas deve ser pelo menos 1.")
-    if not 0 <= payload.tax_rate <= 1:
-        raise ValueError("A alíquota de IR deve estar entre 0 e 1.")
-    if payload.initial_capital <= 0:
-        raise ValueError("O capital inicial deve ser positivo.")
-
-    instrument = resolve_instrument(payload.symbol)
-    strategy = get_strategy(payload.strategy)
-    loaded = _load(payload)
-    costs = CostModel(
-        fee_per_side=payload.costs.fee_per_side,
-        slippage_ticks=payload.costs.slippage_ticks,
-    )
-    split = SampleSplit(
-        enabled=payload.sample_split.enabled,
-        in_sample_fraction=payload.sample_split.in_sample_fraction,
-        split_date=payload.sample_split.split_date,
-    )
-    forward = WalkForwardConfig(
-        enabled=payload.walk_forward.enabled,
-        train_sessions=payload.walk_forward.train_sessions,
-        test_sessions=payload.walk_forward.test_sessions,
-        step_sessions=payload.walk_forward.step_sessions,
-        anchored=payload.walk_forward.anchored,
-        optimize_metric=payload.walk_forward.optimize_metric,
-        param_grid=payload.walk_forward.param_grid,
-    )
+    instrument, strategy, loaded, costs, split, forward = _context(payload)
     result = run_backtest(
         loaded.bars,
         strategy,
@@ -81,8 +51,84 @@ def execute_backtest(payload: BacktestInput) -> dict:
         walk_forward=forward,
     )
     warnings = list(loaded.warnings) + list(result.warnings)
-    body = _serialize(payload, instrument, costs, result, warnings)
-    return body
+    return _serialize(payload, instrument, costs, result, warnings)
+
+
+def execute_study(payload: StudyInput) -> dict:
+    variants = _merge_variants(payload.strategy_params, payload.variants)
+    instrument, strategy, loaded, costs, split, forward = _context(payload)
+    trials, results = run_study(
+        loaded.bars,
+        strategy,
+        variants,
+        instrument,
+        costs,
+        symbol=instrument.symbol,
+        initial_capital=payload.initial_capital,
+        tax_rate=payload.tax_rate,
+        n_trials=payload.n_trials,
+        bar_minutes=TIMEFRAME_MINUTES[payload.timeframe],
+        sample_split=split,
+        walk_forward=forward,
+    )
+    bodies = []
+    for params, result in results:
+        adjusted = payload.model_copy(update={"n_trials": trials, "strategy_params": params})
+        warnings = list(loaded.warnings) + list(result.warnings)
+        bodies.append(_serialize(adjusted, instrument, costs, result, warnings))
+    return {
+        "n_variants": len(variants),
+        "n_trials": trials,
+        "variants": bodies,
+    }
+
+
+def _context(payload: BacktestInput):
+    if payload.end < payload.start:
+        raise ValueError("A data final é anterior à data inicial.")
+    if payload.timeframe not in TIMEFRAME_MINUTES:
+        raise ValueError("Timeframe deve ser 1min, 5min ou 60min.")
+    if payload.n_trials < 1:
+        raise ValueError("O número de configurações testadas deve ser pelo menos 1.")
+    if not 0 <= payload.tax_rate <= 1:
+        raise ValueError("A alíquota de IR deve estar entre 0 e 1.")
+    if payload.initial_capital <= 0:
+        raise ValueError("O capital inicial deve ser positivo.")
+    if payload.costs.fee_per_side < 0 or payload.costs.fee_rate < 0 or payload.costs.slippage_ticks < 0:
+        raise ValueError("Custos não podem ser negativos.")
+
+    instrument = resolve_instrument(payload.symbol)
+    strategy = get_strategy(payload.strategy)
+    loaded = _load(payload)
+    costs = CostModel(
+        fee_per_side=payload.costs.fee_per_side,
+        slippage_ticks=payload.costs.slippage_ticks,
+        fee_rate=payload.costs.fee_rate,
+    )
+    split = SampleSplit(
+        enabled=payload.sample_split.enabled,
+        in_sample_fraction=payload.sample_split.in_sample_fraction,
+        split_date=payload.sample_split.split_date,
+    )
+    forward = WalkForwardConfig(
+        enabled=payload.walk_forward.enabled,
+        train_sessions=payload.walk_forward.train_sessions,
+        test_sessions=payload.walk_forward.test_sessions,
+        step_sessions=payload.walk_forward.step_sessions,
+        anchored=payload.walk_forward.anchored,
+        optimize_metric=payload.walk_forward.optimize_metric,
+        param_grid=payload.walk_forward.param_grid,
+    )
+    return instrument, strategy, loaded, costs, split, forward
+
+
+def _merge_variants(base: dict, variants: list[dict]) -> list[dict]:
+    merged = []
+    for variant in variants:
+        if not isinstance(variant, dict):
+            raise ValueError("Cada variante do estudo precisa ser um objeto de parâmetros.")
+        merged.append({**base, **variant})
+    return merged
 
 
 def _load(payload: BacktestInput):
@@ -124,17 +170,27 @@ def _csv_path(payload: BacktestInput) -> Path | None:
 
 def _serialize(payload: BacktestInput, instrument, costs: CostModel, result: BacktestResult, warnings: list[str]) -> dict:
     tick_value = instrument.tick_value
-    round_turn_fees = costs.fee_per_side * 2
     round_turn_slip = costs.slippage_ticks * tick_value * 2
+    unit = "contrato" if instrument.family == "WIN" else "ação"
+    fee_bits = []
+    if costs.fee_per_side:
+        fee_bits.append(f"R$ {costs.fee_per_side:.2f} fixos por {unit} por lado")
+    if costs.fee_rate:
+        fee_bits.append(
+            f"{costs.fee_rate * 100:.3f}% por lado sobre o valor negociado "
+            "(preço com slippage × quantidade × valor do ponto)"
+        )
+    if not fee_bits:
+        fee_bits.append("sem taxa")
     notes = [
         (
             f"{instrument.symbol}: ponto de R$ {instrument.point_value:.2f} e tick de "
-            f"{instrument.tick_size:g} ponto(s), então 1 tick = R$ {tick_value:.2f} por contrato."
+            f"{instrument.tick_size:g} ponto(s), então 1 tick = R$ {tick_value:.2f} por {unit}."
         ),
         (
-            f"Custos desta execução: R$ {costs.fee_per_side:.2f} por contrato por lado "
-            f"(R$ {round_turn_fees:.2f} na operação) e {costs.slippage_ticks:g} tick(s) adverso(s) "
-            f"por lado (R$ {round_turn_slip:.2f} na operação, por contrato)."
+            f"Custos desta execução: {'; '.join(fee_bits)}. "
+            f"Slippage de {costs.slippage_ticks:g} tick(s) adverso(s) por lado "
+            f"(R$ {round_turn_slip:.2f} na operação, por {unit})."
         ),
         (
             "IR de day trade apurado mês a mês. Prejuízo de um mês compensa lucro dos meses "
@@ -179,6 +235,7 @@ def _serialize(payload: BacktestInput, instrument, costs: CostModel, result: Bac
             "tick_size": instrument.tick_size,
             "tick_value": tick_value,
             "fee_per_side": costs.fee_per_side,
+            "fee_rate": costs.fee_rate,
             "slippage_ticks": costs.slippage_ticks,
             "tax_rate": payload.tax_rate,
             "initial_capital": payload.initial_capital,

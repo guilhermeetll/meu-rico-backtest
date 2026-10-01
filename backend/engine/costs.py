@@ -10,17 +10,24 @@ from engine.models import RawTrade, Trade
 class CostModel:
     """Per-execution costs. Each fill pays the fee and adverse slippage.
 
-    A round trip has two executions (entry and exit).
+    A round trip has two executions (entry and exit). `fee_per_side` is a
+    fixed amount in BRL per contract. `fee_rate` is a fraction of the traded
+    notional of that fill (effective price times point value times quantity).
+    WIN uses the fixed fee. Equities use the percentage fee. Both can be set
+    and are added.
     """
 
     fee_per_side: float = 0.50
     slippage_ticks: float = 1.0
+    fee_rate: float = 0.0
 
     def __post_init__(self) -> None:
         if self.fee_per_side < 0:
             raise ValueError("Custo por execução não pode ser negativo.")
         if self.slippage_ticks < 0:
             raise ValueError("Slippage não pode ser negativo.")
+        if self.fee_rate < 0:
+            raise ValueError("Taxa percentual não pode ser negativa.")
 
 
 def apply_costs(raw: RawTrade, instrument: InstrumentSpec, costs: CostModel, symbol: str) -> Trade:
@@ -38,7 +45,9 @@ def apply_costs(raw: RawTrade, instrument: InstrumentSpec, costs: CostModel, sym
     gross = (raw.exit_price - raw.entry_price) * raw.direction * point
     effective = (exit_eff - entry_eff) * raw.direction * point
     slippage_cost = gross - effective
-    fees = costs.fee_per_side * raw.quantity * 2
+    entry_notional = abs(entry_eff) * instrument.point_value * raw.quantity
+    exit_notional = abs(exit_eff) * instrument.point_value * raw.quantity
+    fees = costs.fee_per_side * raw.quantity * 2 + costs.fee_rate * (entry_notional + exit_notional)
     pnl = effective - fees
     return Trade(
         session_date=raw.session_date,

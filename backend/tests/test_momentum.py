@@ -93,6 +93,80 @@ def test_mixed_contracts_on_one_day_are_skipped():
     assert any("mistura" in warning for warning in warnings)
 
 
+def test_prior_close_includes_the_gap_and_skips_the_first_session():
+    first = date(2026, 9, 17)
+    second = date(2026, 9, 18)
+    rows = _day_bars(first, 100_000, 100_050, 100_100, 100_200, contract="WINV26")
+    rows.extend(_day_bars(second, 100_000, 100_050, 100_100, 100_150, contract="WINV26"))
+    raw, warnings = IntradayMomentumStrategy().generate(
+        _frame(rows), {"signal_anchor": "prior_close"}, WIN, 1
+    )
+    assert len(raw) == 1
+    assert raw[0].session_date == second
+    assert raw[0].direction == -1
+    assert raw[0].signal_return == pytest.approx(100_050 / 100_200 - 1)
+    assert any("2026-09-17" in warning and "fechamento anterior" in warning for warning in warnings)
+
+    opened, _ = IntradayMomentumStrategy().generate(_frame(rows), {"signal_anchor": "session_open"}, WIN, 1)
+    assert opened[1].session_date == second
+    assert opened[1].direction == 1
+
+
+def test_prior_close_does_not_borrow_another_contract():
+    first = date(2026, 9, 17)
+    second = date(2026, 9, 18)
+    rows = _day_bars(first, 180_000, 180_050, 180_100, 180_200, contract="WINV26")
+    rows.extend(_day_bars(second, 100_000, 100_050, 100_100, 100_150, contract="WINZ26"))
+    raw, warnings = IntradayMomentumStrategy().generate(
+        _frame(rows), {"signal_anchor": "prior_close"}, WIN, 1
+    )
+    assert raw == []
+    assert any("WINZ26" in warning for warning in warnings)
+
+
+def test_before_cash_auction_trades_from_1625_to_1655():
+    day = date(2026, 9, 17)
+    rows = [
+        {"timestamp": _stamp(day, 9, 0), "open": 100_000, "high": 100_000, "low": 100_000, "close": 100_000, "volume": 1},
+        {"timestamp": _stamp(day, 9, 29), "open": 100_050, "high": 100_050, "low": 100_050, "close": 100_050, "volume": 1},
+        {"timestamp": _stamp(day, 16, 25), "open": 100_200, "high": 100_200, "low": 100_200, "close": 100_200, "volume": 1},
+        {"timestamp": _stamp(day, 16, 54), "open": 100_240, "high": 100_240, "low": 100_240, "close": 100_250, "volume": 1},
+        {"timestamp": _stamp(day, 17, 55), "open": 100_800, "high": 100_800, "low": 100_800, "close": 100_800, "volume": 1},
+        {"timestamp": _stamp(day, 18, 24), "open": 100_900, "high": 100_900, "low": 100_900, "close": 100_900, "volume": 1},
+    ]
+    raw, _ = IntradayMomentumStrategy().generate(_frame(rows), {"trade_window": "before_cash_auction"}, WIN, 1)
+    assert len(raw) == 1
+    assert raw[0].entry_time.hour == 16 and raw[0].entry_time.minute == 25
+    assert raw[0].entry_price == 100_200
+    assert raw[0].exit_time.hour == 16 and raw[0].exit_time.minute == 55
+    assert raw[0].exit_price == 100_250
+
+    default, _ = IntradayMomentumStrategy().generate(_frame(rows), {}, WIN, 1)
+    assert default[0].entry_time.hour == 17 and default[0].entry_time.minute == 55
+    assert default[0].exit_price == 100_900
+
+
+def test_custom_session_close_still_sets_the_trade_window():
+    day = date(2026, 9, 17)
+    rows = [
+        {"timestamp": _stamp(day, 9, 0), "open": 100_000, "high": 100_000, "low": 100_000, "close": 100_000, "volume": 1},
+        {"timestamp": _stamp(day, 9, 29), "open": 100_050, "high": 100_050, "low": 100_050, "close": 100_050, "volume": 1},
+        {"timestamp": _stamp(day, 16, 40), "open": 100_300, "high": 100_300, "low": 100_300, "close": 100_300, "volume": 1},
+        {"timestamp": _stamp(day, 16, 59), "open": 100_320, "high": 100_320, "low": 100_320, "close": 100_340, "volume": 1},
+        {"timestamp": _stamp(day, 17, 55), "open": 100_800, "high": 100_800, "low": 100_800, "close": 100_800, "volume": 1},
+    ]
+    raw, _ = IntradayMomentumStrategy().generate(
+        _frame(rows),
+        {"trade_window": "session_close", "session_close": "17:00", "trade_minutes": 20},
+        WIN,
+        1,
+    )
+    assert len(raw) == 1
+    assert raw[0].entry_time.hour == 16 and raw[0].entry_time.minute == 40
+    assert raw[0].exit_time.hour == 17 and raw[0].exit_time.minute == 0
+    assert raw[0].exit_price == 100_340
+
+
 def test_overlapping_windows_are_skipped():
     day = date(2026, 9, 17)
     bars = _frame(_day_bars(day, 100_000, 100_050, 100_100, 100_150))

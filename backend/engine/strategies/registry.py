@@ -33,6 +33,7 @@ def list_strategies() -> list[dict]:
                         "min": field.min,
                         "max": field.max,
                         "step": field.step,
+                        "options": list(field.options),
                     }
                     for field in strategy.param_schema()
                 ],

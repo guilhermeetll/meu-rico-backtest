@@ -80,6 +80,15 @@ export type BacktestResult = {
   trades: TradeRow[];
   warnings: string[];
   notes: string[];
+  request: {
+    strategy_params: Record<string, unknown>;
+  };
+};
+
+export type StudyResult = {
+  n_variants: number;
+  n_trials: number;
+  variants: Array<Omit<BacktestResult, "id" | "created_at">>;
 };
 
 export type HistoryItem = {

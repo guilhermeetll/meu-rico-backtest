@@ -17,6 +17,7 @@ class ParamField:
     min: float | None = None
     max: float | None = None
     step: float | None = None
+    options: tuple[str, ...] = ()
 
 
 class Strategy(ABC):

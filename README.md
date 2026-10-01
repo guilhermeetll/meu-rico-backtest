@@ -79,13 +79,19 @@ Especificação do minicontrato futuro de Ibovespa:
 - Tick mínimo = 5 pontos.
 - 1 tick = 5 × 0,20 = R$ 1,00 por contrato.
 
-Custo padrão: R$ 0,50 por contrato **por execução** (cada lado). Entrada e zeragem custam R$ 1,00 de corretagem/emolumentos, mais o slippage. Não é a tabela de uma corretora específica.
+Custo padrão: R$ 0,50 por contrato **por execução** (cada lado). Entrada e zeragem custam R$ 1,00 de corretagem/emolumentos, mais o slippage. Não é a tabela de uma corretora específica. A taxa do WIN é valor fixo por contrato, não um percentual do nocional.
 
 Slippage padrão: 1 tick adverso por execução (dá para usar 2). Na compra, a entrada fica mais cara e a saída mais barata. Na venda, o contrário. Com 1 tick, a operação completa perde R$ 2,00 por contrato além da taxa.
 
 O capital inicial padrão (R$ 10.000) só serve de denominador do retorno e do Sharpe. Não é a margem exigida pela B3.
 
-Ações usam ponto R$ 1,00 e tick de R$ 0,01. O padrão de custo do WIN não se aplica; ajuste a taxa e o slippage no formulário. O Yahoo não tem o WIN.
+## Premissas de custo de ações
+
+Ação à vista (e o que não é WIN): ponto R$ 1,00. O tick é R$ 0,01 no lote-padrão e no fracionário, conforme a tabela pública de tick size da B3 de janeiro de 2021, que continua sendo a referência do mercado à vista. 1 tick = R$ 0,01 por ação.
+
+Custo padrão, também uma premissa e não a tabela de uma corretora: **0,023% por lado** sobre o valor negociado, mais **1 tick** de slippage. O percentual incide em cada execução, sobre o preço efetivo (já com o slippage) vezes a quantidade vezes o valor do ponto. Uma compra e uma venda pagam a taxa duas vezes. O WIN não usa esse percentual; continua no valor fixo por contrato. Dá para zerar ou trocar os dois campos no formulário.
+
+O Yahoo não tem o WIN.
 
 ## Imposto de renda
 
@@ -112,9 +118,19 @@ Dá para fixar abertura e fechamento em `HH:MM` no lugar de `auto`. Para ações
 
 ## Estratégia de momentum
 
-O retorno da primeira janela do pregão (padrão: 30 minutos) é preço no fim da janela dividido pelo primeiro preço do pregão, menos um. Esse retorno usa só barras da série daquele dia. Compra se passar do limiar, vende se ficar abaixo do limiar negativo, e fica de fora no meio. A entrada é a abertura da primeira barra da última janela (padrão: 30 minutos). A saída é o fechamento da última barra que termina até o fim do pregão. Não há posição overnight.
+Há duas referências de sinal, as duas na API (`signal_anchor`) e na tela:
 
-Um timeframe mais grosso que a janela (60 minutos com sinal de 30) não olha o miolo de uma barra ainda aberta: o pregão é pulado.
+- `session_open` (padrão): preço no fim da primeira janela (30 minutos) dividido pela abertura do pregão, menos um. É o movimento só da manhã.
+- `prior_close`: o mesmo preço no fim da primeira janela dividido pelo fechamento anterior **do mesmo contrato**, menos um. Inclui o gap noturno, como em Gao, Han, Li e Zhou (2018), *Market intraday momentum*. Usa `return_versus_prior_close`. Se esse fechamento não está na série, o sinal daquele pregão é pulado — não se empresta o fechamento de outro vencimento.
+
+Compra se passar do limiar, vende se ficar abaixo do limiar negativo, e fica de fora no meio.
+
+A janela da operação também tem duas opções (`trade_window`):
+
+- `session_close` (padrão): entra nos últimos `trade_minutes` (30) e zera no fechamento do pregão. No WIN automático isso é 17:55–18:25. Abertura, fechamento e duração continuam editáveis (`HH:MM` ou `auto`).
+- `before_cash_auction`: entra às 16:25 e zera às 16:55, antes do leilão de fechamento do mercado à vista. Os horários da outra opção continuam configuráveis; esta é a alternativa pronta para não operar depois que o à vista já fechou.
+
+Não há posição overnight. Um timeframe mais grosso que a janela do sinal não olha o miolo de uma barra ainda aberta: o pregão é pulado.
 
 ## Métricas
 
@@ -122,7 +138,7 @@ Sobre o capital de referência, com pregões sem operação contando retorno zer
 
 - retorno total e resultado líquido de custos;
 - Sharpe anualizado com √252 e taxa livre de risco zero;
-- Sharpe deflacionado de Bailey e López de Prado (2014): probabilidade de o Sharpe diário, não o anualizado, superar o máximo esperado entre N configurações, com assimetria e curtose. N vem do formulário. No walk-forward com grade, N é pelo menos o tamanho da grade. Com N = 1 o referencial é zero;
+- Sharpe deflacionado de Bailey e López de Prado (2014): probabilidade de o Sharpe diário, não o anualizado, superar o máximo esperado entre N configurações, com assimetria e curtose. N vem do formulário. No walk-forward com grade, N é pelo menos o tamanho da grade. Num estudo com várias variantes (`POST /api/studies`), N de cada variante é pelo menos o número de variantes rodadas juntas, para o melhor resultado não parecer um teste único. Com N = 1 o referencial é zero;
 - drawdown máximo em reais e em percentual da curva de capital;
 - número de operações, taxa de acerto (pnl positivo sobre o total; empate não é acerto) e payoff (média do ganho sobre o módulo da média da perda);
 - resultado líquido de IR e a curva de capital antes e depois do imposto, cobrado no fim de cada mês.

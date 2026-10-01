@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 class CostInput(BaseModel):
     fee_per_side: float = 0.5
     slippage_ticks: float = 1.0
+    fee_rate: float = 0.0
 
 
 class SampleSplitInput(BaseModel):
@@ -43,3 +44,9 @@ class BacktestInput(BaseModel):
     include_after_hours: bool = False
     sample_split: SampleSplitInput = Field(default_factory=SampleSplitInput)
     walk_forward: WalkForwardInput = Field(default_factory=WalkForwardInput)
+
+
+class StudyInput(BacktestInput):
+    """Same data and costs for every variant. Each item overrides strategy_params."""
+
+    variants: list[dict] = Field(min_length=1)

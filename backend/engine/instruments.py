@@ -13,6 +13,7 @@ class InstrumentSpec:
     tick_size: float
     asset_class: str
     default_fee_per_side: float
+    default_fee_rate: float
     default_slippage_ticks: float
 
     @property
@@ -30,6 +31,23 @@ WIN = InstrumentSpec(
     tick_size=5.0,
     asset_class="future",
     default_fee_per_side=0.50,
+    default_fee_rate=0.0,
+    default_slippage_ticks=1.0,
+)
+
+# Cash equities. B3's public tick-size table (January 2021, the reference
+# still published for the cash market) sets the stock tick, round lot and
+# odd lot, at R$ 0.01. The default cost is an assumption, not a broker
+# schedule: 0.023% of traded value per side, plus one tick of slippage.
+EQUITY_FEE_RATE = 0.00023
+EQUITY = InstrumentSpec(
+    symbol="ACAO",
+    family="EQUITY",
+    point_value=1.0,
+    tick_size=0.01,
+    asset_class="equity",
+    default_fee_per_side=0.0,
+    default_fee_rate=EQUITY_FEE_RATE,
     default_slippage_ticks=1.0,
 )
 
@@ -44,14 +62,16 @@ def resolve_instrument(symbol: str) -> InstrumentSpec:
             tick_size=WIN.tick_size,
             asset_class="future",
             default_fee_per_side=WIN.default_fee_per_side,
+            default_fee_rate=WIN.default_fee_rate,
             default_slippage_ticks=WIN.default_slippage_ticks,
         )
     return InstrumentSpec(
         symbol=root,
-        family="EQUITY",
-        point_value=1.0,
-        tick_size=0.01,
-        asset_class="equity",
-        default_fee_per_side=0.0,
-        default_slippage_ticks=0.0,
+        family=EQUITY.family,
+        point_value=EQUITY.point_value,
+        tick_size=EQUITY.tick_size,
+        asset_class=EQUITY.asset_class,
+        default_fee_per_side=EQUITY.default_fee_per_side,
+        default_fee_rate=EQUITY.default_fee_rate,
+        default_slippage_ticks=EQUITY.default_slippage_ticks,
     )

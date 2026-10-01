@@ -9,8 +9,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { getBacktest, listBacktests, runBacktest, uploadCsv } from "./api";
-import type { BacktestResult, HistoryItem, Metrics } from "./types";
+import { getBacktest, listBacktests, runBacktest, runStudy, uploadCsv } from "./api";
+import type { BacktestResult, HistoryItem, Metrics, StudyResult } from "./types";
 
 const brl = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
 const pct = new Intl.NumberFormat("pt-BR", { style: "percent", maximumFractionDigits: 2 });
@@ -50,6 +50,12 @@ function clock(iso: string): string {
 function when(iso: string | null): string {
   if (!iso) return "";
   return new Date(iso).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+}
+
+function variantLabel(params: Record<string, unknown>): string {
+  const anchor = params.signal_anchor === "prior_close" ? "Fechamento anterior" : "Abertura do pregão";
+  const windowName = params.trade_window === "before_cash_auction" ? "16:25–16:55" : "Até o fechamento";
+  return `${anchor} · ${windowName}`;
 }
 
 function MetricCards({ metrics }: { metrics: Metrics }) {
@@ -114,12 +120,15 @@ export function App() {
   const [file, setFile] = useState<File | null>(null);
   const [columnMap, setColumnMap] = useState("");
   const [signalMinutes, setSignalMinutes] = useState(30);
+  const [signalAnchor, setSignalAnchor] = useState("session_open");
   const [tradeMinutes, setTradeMinutes] = useState(30);
+  const [tradeWindow, setTradeWindow] = useState("session_close");
   const [threshold, setThreshold] = useState(0);
   const [quantity, setQuantity] = useState(1);
   const [sessionOpen, setSessionOpen] = useState("auto");
   const [sessionClose, setSessionClose] = useState("auto");
   const [fee, setFee] = useState(0.5);
+  const [feePercent, setFeePercent] = useState(0);
   const [slippage, setSlippage] = useState(1);
   const [tax, setTax] = useState(20);
   const [capital, setCapital] = useState(10000);
@@ -136,9 +145,13 @@ export function App() {
   const [metric, setMetric] = useState("sharpe");
   const [thresholds, setThresholds] = useState("");
   const [running, setRunning] = useState(false);
+  const [comparing, setComparing] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<BacktestResult | null>(null);
+  const [study, setStudy] = useState<StudyResult | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const costFamily = symbol.toUpperCase().startsWith("WIN") ? "WIN" : "EQUITY";
+  const [appliedFamily, setAppliedFamily] = useState("WIN");
 
   async function refreshHistory() {
     try {
@@ -152,6 +165,20 @@ export function App() {
     void refreshHistory();
   }, []);
 
+  useEffect(() => {
+    if (costFamily === appliedFamily) return;
+    setAppliedFamily(costFamily);
+    if (costFamily === "WIN") {
+      setFee(0.5);
+      setFeePercent(0);
+      setSlippage(1);
+    } else {
+      setFee(0);
+      setFeePercent(0.023);
+      setSlippage(1);
+    }
+  }, [appliedFamily, costFamily]);
+
   const timeframes = useMemo(() => {
     if (dataSource === "yahoo") return ["5min", "60min"];
     return ["1min", "5min", "60min"];
@@ -161,73 +188,99 @@ export function App() {
     if (!timeframes.includes(timeframe)) setTimeframe(timeframes[0]);
   }, [timeframes, timeframe]);
 
+  async function buildRequest() {
+    let csvSource = "example";
+    if (dataSource === "csv" && !useExample) {
+      if (!file) throw new Error("Escolha um CSV ou use o arquivo de exemplo.");
+      csvSource = await uploadCsv(file);
+    }
+    let parsedMap: Record<string, string> | null = null;
+    if (columnMap.trim()) {
+      const parsed = JSON.parse(columnMap) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("O mapeamento de colunas precisa ser um objeto JSON.");
+      }
+      parsedMap = parsed as Record<string, string>;
+    }
+    const gridValues = thresholds
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map(Number);
+    return {
+      strategy: "intraday_momentum",
+      symbol,
+      data_source: dataSource,
+      timeframe,
+      start,
+      end,
+      csv_source: csvSource,
+      column_map: parsedMap,
+      strategy_params: {
+        signal_minutes: signalMinutes,
+        signal_anchor: signalAnchor,
+        trade_minutes: tradeMinutes,
+        trade_window: tradeWindow,
+        threshold,
+        quantity,
+        session_open: sessionOpen,
+        session_close: sessionClose,
+      },
+      costs: { fee_per_side: fee, slippage_ticks: slippage, fee_rate: feePercent / 100 },
+      tax_rate: tax / 100,
+      initial_capital: capital,
+      n_trials: nTrials,
+      include_after_hours: includeAfterHours,
+      sample_split: {
+        enabled: splitEnabled,
+        in_sample_fraction: splitFraction,
+        split_date: splitDate || null,
+      },
+      walk_forward: {
+        enabled: wfEnabled,
+        train_sessions: train,
+        test_sessions: testSize,
+        step_sessions: step ? Number(step) : null,
+        anchored,
+        optimize_metric: metric,
+        param_grid: gridValues.length ? { threshold: gridValues } : null,
+      },
+    };
+  }
+
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
     setRunning(true);
     setError("");
     try {
-      let csvSource = "example";
-      if (dataSource === "csv" && !useExample) {
-        if (!file) throw new Error("Escolha um CSV ou use o arquivo de exemplo.");
-        csvSource = await uploadCsv(file);
-      }
-      let parsedMap: Record<string, string> | null = null;
-      if (columnMap.trim()) {
-        const parsed = JSON.parse(columnMap) as unknown;
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-          throw new Error("O mapeamento de colunas precisa ser um objeto JSON.");
-        }
-        parsedMap = parsed as Record<string, string>;
-      }
-      const gridValues = thresholds
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean)
-        .map(Number);
-      const payload = {
-        strategy: "intraday_momentum",
-        symbol,
-        data_source: dataSource,
-        timeframe,
-        start,
-        end,
-        csv_source: csvSource,
-        column_map: parsedMap,
-        strategy_params: {
-          signal_minutes: signalMinutes,
-          trade_minutes: tradeMinutes,
-          threshold,
-          quantity,
-          session_open: sessionOpen,
-          session_close: sessionClose,
-        },
-        costs: { fee_per_side: fee, slippage_ticks: slippage },
-        tax_rate: tax / 100,
-        initial_capital: capital,
-        n_trials: nTrials,
-        include_after_hours: includeAfterHours,
-        sample_split: {
-          enabled: splitEnabled,
-          in_sample_fraction: splitFraction,
-          split_date: splitDate || null,
-        },
-        walk_forward: {
-          enabled: wfEnabled,
-          train_sessions: train,
-          test_sessions: testSize,
-          step_sessions: step ? Number(step) : null,
-          anchored,
-          optimize_metric: metric,
-          param_grid: gridValues.length ? { threshold: gridValues } : null,
-        },
-      };
-      const created = await runBacktest(payload);
+      const created = await runBacktest(await buildRequest());
       setResult(created);
       await refreshHistory();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Não foi possível rodar o backtest.");
     } finally {
       setRunning(false);
+    }
+  }
+
+  async function onCompare() {
+    setComparing(true);
+    setError("");
+    try {
+      const payload = await buildRequest();
+      setStudy(await runStudy({
+        ...payload,
+        variants: [
+          { signal_anchor: "session_open", trade_window: "session_close" },
+          { signal_anchor: "session_open", trade_window: "before_cash_auction" },
+          { signal_anchor: "prior_close", trade_window: "session_close" },
+          { signal_anchor: "prior_close", trade_window: "before_cash_auction" },
+        ],
+      }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Não foi possível comparar as variantes.");
+    } finally {
+      setComparing(false);
     }
   }
 
@@ -327,6 +380,23 @@ export function App() {
           </fieldset>
           <fieldset>
             <legend>Estratégia</legend>
+            <label>
+              Referência do sinal
+              <select value={signalAnchor} onChange={(event) => setSignalAnchor(event.target.value)}>
+                <option value="session_open">Abertura do pregão até o fim da primeira janela</option>
+                <option value="prior_close">Fechamento anterior do mesmo contrato, com o gap</option>
+              </select>
+            </label>
+            <p className="hint">
+              O fechamento anterior é o de Gao, Han, Li e Zhou (2018). Se esse pregão do mesmo contrato não existir, o sinal é pulado.
+            </p>
+            <label>
+              Janela da operação
+              <select value={tradeWindow} onChange={(event) => setTradeWindow(event.target.value)}>
+                <option value="session_close">Últimos minutos até o fechamento</option>
+                <option value="before_cash_auction">16:25–16:55, antes do leilão do à vista</option>
+              </select>
+            </label>
             <div className="grid-2">
               <label>
                 Sinal (min)
@@ -357,14 +427,25 @@ export function App() {
                 <input value={sessionClose} onChange={(event) => setSessionClose(event.target.value)} />
               </label>
             </div>
+            {tradeWindow === "before_cash_auction" ? (
+              <p className="hint">A operação entra às 16:25 e zera às 16:55. Abertura, fechamento e minutos continuam valendo na opção até o fechamento.</p>
+            ) : (
+              <p className="hint">A entrada é no início dos últimos minutos e a saída é no fechamento informado, ou no horário automático do ativo.</p>
+            )}
           </fieldset>
           <fieldset>
             <legend>Custos, slippage e IR</legend>
             <div className="grid-2">
               <label>
-                Custo por lado (R$)
+                Custo fixo por lado (R$)
                 <input type="number" min={0} step="0.01" value={fee} onChange={(event) => setFee(Number(event.target.value))} />
               </label>
+              <label>
+                Taxa por lado (%)
+                <input type="number" min={0} step="0.001" value={feePercent} onChange={(event) => setFeePercent(Number(event.target.value))} />
+              </label>
+            </div>
+            <div className="grid-2">
               <label>
                 Slippage (ticks)
                 <input type="number" min={0} step="1" value={slippage} onChange={(event) => setSlippage(Number(event.target.value))} />
@@ -377,7 +458,7 @@ export function App() {
               </label>
               <label>
                 Capital de referência
-                <input type="number" min={1} step="100" value={capital} onChange={(event) => setCapital(Number(event.target.value))} />
+                <input type="number" min={1} step="1" value={capital} onChange={(event) => setCapital(Number(event.target.value))} />
               </label>
             </div>
             <label>
@@ -442,10 +523,15 @@ export function App() {
               </>
             )}
           </fieldset>
-          <button className="run" type="submit" disabled={running}>
+          <button className="run" type="submit" disabled={running || comparing}>
             {running ? "Rodando backtest…" : "Rodar backtest"}
           </button>
-          <p className="hint">Padrão do WIN: R$ 0,50 por contrato por lado e 1 tick de slippage. 1 tick = 5 pontos = R$ 1,00.</p>
+          <button className="secondary" type="button" onClick={() => void onCompare()} disabled={running || comparing}>
+            {comparing ? "Comparando variantes…" : "Comparar sinal e janela"}
+          </button>
+          <p className="hint">
+            WIN: R$ 0,50 por contrato por lado e 1 tick (5 pontos = R$ 1,00). Ação: 0,023% por lado sobre o valor negociado e 1 tick de R$ 0,01. A comparação usa as quatro combinações e o Sharpe deflacionado de cada uma leva o total de variantes.
+          </p>
         </form>
         <section className="panel">
           <h2>Resultado</h2>
@@ -547,6 +633,40 @@ export function App() {
           )}
         </section>
       </div>
+      {study && (
+        <section className="panel history">
+          <h2>Estudo · {study.n_variants} variantes</h2>
+          <p className="hint">
+            Sharpe deflacionado de cada linha usa N = {study.n_trials}, o total de configurações deste estudo.
+          </p>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Variante</th>
+                  <th>Operações</th>
+                  <th>Líquido de IR</th>
+                  <th>Sharpe</th>
+                  <th>Sharpe deflacionado</th>
+                  <th>N</th>
+                </tr>
+              </thead>
+              <tbody>
+                {study.variants.map((item) => (
+                  <tr key={variantLabel(item.request.strategy_params)}>
+                    <td>{variantLabel(item.request.strategy_params)}</td>
+                    <td>{item.metrics.n_trades}</td>
+                    <td className={moneyClass(item.metrics.net_pnl_after_tax)}>{brl.format(item.metrics.net_pnl_after_tax)}</td>
+                    <td>{formatRatio(item.metrics.sharpe)}</td>
+                    <td>{formatPercent(item.metrics.deflated_sharpe)}</td>
+                    <td>{item.metrics.n_trials}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
       <section className="panel history">
         <h2>Histórico</h2>
         {history.length === 0 && <p className="empty">Nenhuma execução gravada ainda.</p>}
