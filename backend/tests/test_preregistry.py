@@ -33,6 +33,9 @@ def test_catalog_splits_the_core_from_the_extras():
     assert "Extras" in text
     assert "16:55" in text
     assert "0,5%, 1%, 1,5%" in text
+    assert "pelo menos 1 minuto depois do primeiro negócio" in text
+    assert "30 minutos" in text
+    assert "16:49" in text
 
 
 def test_cli_writes_the_grid_and_keeps_a_larger_n(tmp_path: Path):

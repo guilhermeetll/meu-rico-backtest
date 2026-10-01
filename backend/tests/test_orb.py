@@ -147,11 +147,43 @@ def test_equity_end_of_day_is_the_closing_call():
     assert raw[0].exit_time.hour == 16 and raw[0].exit_time.minute == 55
 
 
-def test_opening_print_five_minutes_late_still_rejects_the_range():
+def test_the_range_starts_at_the_first_trade():
     raw, _, skipped = _generate([
-        _bar(DAY, 9, 6, 105, 110, 100, 105),
-        _bar(DAY, 9, 10, 112, 112, 112, 112),
+        _bar(DAY, 10, 8, 100, 102, 99, 101),
+        _bar(DAY, 10, 12, 101, 103, 100, 102),
+        _bar(DAY, 10, 13, 103, 105, 103, 104),
+        _bar(DAY, 10, 14, 105, 105, 105, 105),
+        _bar(DAY, 16, 54, 106, 106, 106, 106),
+    ], instrument=PETR4)
+    assert skipped == []
+    assert len(raw) == 1
+    assert raw[0].direction == 1
+    assert raw[0].entry_time.hour == 10 and raw[0].entry_time.minute == 14
+    assert raw[0].entry_price == 105
+    assert raw[0].exit_price == 106
+
+
+def test_a_first_print_after_the_open_tolerance_skips_the_signal():
+    raw, _, skipped = _generate([
+        _bar(DAY, 9, 31, 105, 110, 100, 105),
+        _bar(DAY, 9, 36, 112, 112, 112, 112),
         _tail(),
     ])
     assert raw == []
-    assert any(item.window == "signal" for item in skipped)
+    assert any(item.window == "signal" and "30" in item.reason for item in skipped)
+
+
+def test_continuous_ending_at_16_49_exits_there_with_a_warning():
+    raw, warnings, skipped = _generate([
+        _bar(DAY, 10, 0, 10, 11, 9, 10),
+        _bar(DAY, 10, 4, 10, 11, 9, 10),
+        _bar(DAY, 10, 5, 11, 12, 11, 12),
+        _bar(DAY, 10, 6, 12, 12, 12, 12),
+        _bar(DAY, 16, 49, 13, 13, 13, 13),
+        _bar(DAY, 17, 5, 20, 20, 20, 20),
+    ], instrument=PETR4)
+    assert skipped == []
+    assert raw[0].exit_price == 13
+    assert raw[0].exit_time.hour == 16 and raw[0].exit_time.minute == 50
+    assert raw[0].exit_price != 20
+    assert any("16:49" in warning and "pregão pulado" not in warning for warning in warnings)

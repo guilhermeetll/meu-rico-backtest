@@ -166,6 +166,67 @@ def cash_call_start(day) -> time:
     return call_start
 
 
+def first_regular_bar(day_bars: pd.DataFrame, session_open: pd.Timestamp, session_close: pd.Timestamp, tolerance: timedelta):
+    """First bar of the regular session, within `tolerance` of the calendar open.
+
+    The auction often prints after the official open. That bar is the open.
+    A later print, past the tolerance, is not.
+    """
+    window = day_bars[
+        (day_bars["timestamp"] >= session_open)
+        & (day_bars["timestamp"] <= session_open + tolerance)
+        & (day_bars["timestamp"] < session_close)
+    ]
+    if window.empty:
+        return None
+    return window.sort_values("timestamp").iloc[0]
+
+
+def missing_open_reason(day_bars: pd.DataFrame, session_open: pd.Timestamp, tolerance: timedelta, tolerance_minutes: int) -> str:
+    label = hhmm(session_open)
+    limit = session_open + tolerance
+    later = day_bars[day_bars["timestamp"] > limit]
+    if not later.empty:
+        first = later.sort_values("timestamp").iloc[0]["timestamp"]
+        return (
+            f"Janela do sinal {span(session_open, limit)}: sem o preço de abertura "
+            f"(primeira barra às {hhmm(first)}, fora da tolerância de {tolerance_minutes} minutos "
+            f"a partir de {label})"
+        )
+    return (
+        f"Janela do sinal {span(session_open, limit)}: sem o preço de abertura "
+        f"dentro de {tolerance_minutes} minutos a partir de {label}"
+    )
+
+
+def forced_continuous_exit(day_bars: pd.DataFrame, call_start: pd.Timestamp, tolerance: timedelta, bar_delta: timedelta):
+    """Where an open position leaves when continuous trading ends.
+
+    The bar that closes exactly at the call exits at the call. If that bar is
+    missing, the last bar that starts inside `tolerance` before the call is
+    the exit, and the caller records a warning instead of skipping the day.
+    Returns (exit_clock, exit_bar, early). exit_clock is None when nothing
+    in the tolerance can close the position.
+    """
+    exact_start = call_start - bar_delta
+    exact = day_bars.loc[day_bars["timestamp"] == exact_start]
+    if not exact.empty:
+        return call_start, exact.iloc[0], False
+    earliest = call_start - tolerance
+    candidates = day_bars[(day_bars["timestamp"] >= earliest) & (day_bars["timestamp"] < call_start)]
+    if candidates.empty:
+        return None, None, False
+    row = candidates.sort_values("timestamp").iloc[-1]
+    return pd.Timestamp(row["timestamp"]) + bar_delta, row, True
+
+
+def early_close_warning(day, bar_stamp, call_start) -> str:
+    return (
+        f"{day.isoformat()}: o contínuo terminou às {hhmm(bar_stamp)}, "
+        f"antes do leilão das {hhmm(call_start)}. Saída no último negócio regular."
+    )
+
+
 def regular_close(family: str, day, contract: str | None) -> time:
     """Last instant of the regular session, before the closing auction.
 
@@ -188,6 +249,17 @@ def coverage_params(resolved: dict) -> tuple[float, int]:
     if edge_minutes < 0:
         raise ValueError("A tolerância da primeira barra não pode ser negativa.")
     return min_coverage, edge_minutes
+
+
+def clock_tolerances(resolved: dict) -> tuple[int, int]:
+    """Minutes the first print may lag the open, and the close may lead the call."""
+    open_minutes = int(resolved["open_tolerance_minutes"])
+    close_minutes = int(resolved["close_tolerance_minutes"])
+    if open_minutes < 0:
+        raise ValueError("A tolerância da abertura não pode ser negativa.")
+    if close_minutes < 0:
+        raise ValueError("A tolerância do fechamento não pode ser negativa.")
+    return open_minutes, close_minutes
 
 
 def quantity_of(resolved: dict) -> int:

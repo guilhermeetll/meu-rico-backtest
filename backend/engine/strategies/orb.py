@@ -1,10 +1,10 @@
 """Opening-range breakout, the control strategy in docs/preregistro.md.
 
-The range is the high and the low of the first N minutes of the regular
-session, N in {5, 15, 30}. The first later bar that closes outside that
-range sets the direction. Entry is the open of the next bar, at most one
-trade per day. The stop is the other side of the range. There is no target;
-whatever is left exits at the end of the regular session.
+The range is the high and the low from the first regular print through the
+next N minutes, N in {5, 15, 30}. The first later bar that closes outside
+that range sets the direction. Entry is the open of the next bar, at most
+one trade per day. The stop is the other side of the range. There is no
+target; whatever is left exits at the end of continuous trading.
 """
 
 from __future__ import annotations
@@ -21,9 +21,14 @@ from engine.strategies.base import ParamField, Strategy
 from engine.strategies.common import (
     at,
     cash_call_start,
+    clock_tolerances,
     contract_of,
     coverage_params,
+    early_close_warning,
+    first_regular_bar,
+    forced_continuous_exit,
     incomplete_window,
+    missing_open_reason,
     quantity_of,
     span,
     unique,
@@ -46,11 +51,11 @@ class OpeningRangeBreakoutStrategy(Strategy):
     id = "opening_range_breakout"
     label = "Rompimento da faixa de abertura"
     description = (
-        "A faixa é a máxima e a mínima dos primeiros 5, 15 ou 30 minutos. "
+        "A faixa começa no primeiro negócio e dura 5, 15 ou 30 minutos. "
         "O primeiro fechamento fora da faixa define a direção, e a entrada é "
         "a abertura da barra seguinte. O stop fica no outro extremo. Sem alvo: "
-        "o que não parar sai quando começa o leilão do à vista, às 16:55 no pregão "
-        "ordinário, no WIN e nas ações. No máximo uma operação por dia."
+        "o que não parar sai no fim do contínuo, às 16:55 no pregão ordinário, "
+        "ou no último negócio regular se o pregão parar antes. No máximo uma operação por dia."
     )
 
     def param_schema(self) -> list[ParamField]:
@@ -61,7 +66,7 @@ class OpeningRangeBreakoutStrategy(Strategy):
                 "select",
                 5,
                 options=("5", "15", "30"),
-                help="Primeiros minutos da sessão regular. A grade é 5, 15 e 30.",
+                help="Minutos a partir do primeiro negócio. A grade é 5, 15 e 30.",
             ),
             ParamField("quantity", "Quantidade", "int", 1, min=1, step=1),
             ParamField(
@@ -81,7 +86,25 @@ class OpeningRangeBreakoutStrategy(Strategy):
                 5,
                 min=0,
                 max=120,
-                help="A primeira barra de cada janela pode atrasar até esse tanto.",
+                help="Dentro da janela já ancorada no primeiro negócio, a barra de início pode atrasar até esse tanto.",
+            ),
+            ParamField(
+                "open_tolerance_minutes",
+                "Tolerância da abertura (min)",
+                "int",
+                30,
+                min=0,
+                max=180,
+                help="O primeiro negócio pode sair até esse tanto depois da abertura do calendário. Depois disso o pregão é pulado.",
+            ),
+            ParamField(
+                "close_tolerance_minutes",
+                "Tolerância do fechamento (min)",
+                "int",
+                15,
+                min=0,
+                max=120,
+                help="Se a barra do call não existe, a saída é o último negócio regular dentro desse intervalo antes do leilão.",
             ),
         ]
 
@@ -96,8 +119,11 @@ class OpeningRangeBreakoutStrategy(Strategy):
         range_minutes = _range_minutes(resolved["range_minutes"])
         quantity = quantity_of(resolved)
         min_coverage, edge_minutes = coverage_params(resolved)
+        open_minutes, close_minutes = clock_tolerances(resolved)
         bar_delta = timedelta(minutes=bar_minutes)
         edge = timedelta(minutes=edge_minutes)
+        open_tolerance = timedelta(minutes=open_minutes)
+        close_tolerance = timedelta(minutes=close_minutes)
         warnings: list[str] = []
         skipped: list[SkippedSession] = []
         trades: list[RawTrade] = []
@@ -117,42 +143,53 @@ class OpeningRangeBreakoutStrategy(Strategy):
             open_t, _ = session_bounds(instrument.family, day, contract)
             session_open = at(day, open_t, tz)
             session_close = at(day, cash_call_start(day), tz)
-            range_end = session_open + timedelta(minutes=range_minutes)
+            opening = first_regular_bar(ordered, session_open, session_close, open_tolerance)
+            if opening is None:
+                reason = missing_open_reason(ordered, session_open, open_tolerance, open_minutes)
+                warnings.append(f"{day.isoformat()}: pregão pulado. {reason}")
+                skipped.append(SkippedSession(session_date=day, window="signal", reason=f"{reason}."))
+                continue
+            range_start = pd.Timestamp(opening["timestamp"])
+            range_end = range_start + timedelta(minutes=range_minutes)
             if range_end >= session_close:
                 warnings.append(
                     f"{day.isoformat()}: a faixa de {range_minutes} minutos não cabe antes do fechamento."
                 )
                 continue
+            exit_clock, exit_bar, early = forced_continuous_exit(
+                ordered, session_close, close_tolerance, bar_delta,
+            )
+            trade_end = exit_clock if exit_clock is not None else session_close
             gaps = []
             signal_gap = incomplete_window(
-                ordered["timestamp"], session_open, range_end, bar_delta, edge,
+                ordered["timestamp"], range_start, range_end, bar_delta, edge,
                 min_coverage, bar_minutes, edge_minutes,
             )
             if signal_gap:
-                gaps.append(f"Janela do sinal {span(session_open, range_end)}: {signal_gap}")
+                gaps.append(f"Janela do sinal {span(range_start, range_end)}: {signal_gap}")
             trade_gap = incomplete_window(
-                ordered["timestamp"], range_end, session_close, bar_delta, edge,
+                ordered["timestamp"], range_end, trade_end, bar_delta, edge,
                 min_coverage, bar_minutes, edge_minutes,
             )
             if trade_gap:
-                gaps.append(f"Janela da operação {span(range_end, session_close)}: {trade_gap}")
+                gaps.append(f"Janela da operação {span(range_end, trade_end)}: {trade_gap}")
             if gaps:
                 warnings.append(f"{day.isoformat()}: pregão pulado. {'. '.join(gaps)}.")
                 if signal_gap:
                     skipped.append(SkippedSession(
                         session_date=day,
                         window="signal",
-                        reason=f"Janela do sinal {span(session_open, range_end)}: {signal_gap}.",
+                        reason=f"Janela do sinal {span(range_start, range_end)}: {signal_gap}.",
                     ))
                 if trade_gap:
                     skipped.append(SkippedSession(
                         session_date=day,
                         window="trade",
-                        reason=f"Janela da operação {span(range_end, session_close)}: {trade_gap}.",
+                        reason=f"Janela da operação {span(range_end, trade_end)}: {trade_gap}.",
                     ))
                 continue
 
-            ranged = ordered[(ordered["timestamp"] >= session_open) & (ordered["timestamp"] < range_end)]
+            ranged = ordered[(ordered["timestamp"] >= range_start) & (ordered["timestamp"] < range_end)]
             if ranged.empty:
                 continue
             range_high = float(ranged["high"].max())
@@ -163,9 +200,16 @@ class OpeningRangeBreakoutStrategy(Strategy):
 
             after = ordered[(ordered["timestamp"] >= range_end) & (ordered["timestamp"] < session_close)]
             trade = _first_breakout(
-                after, range_high, range_low, session_close, bar_delta, quantity, day,
+                after, range_high, range_low, trade_end, bar_delta, quantity, day,
             )
             if trade is not None:
+                if (
+                    early
+                    and exit_bar is not None
+                    and pd.Timestamp(trade.exit_time) == pd.Timestamp(trade_end)
+                    and float(trade.exit_price) == float(exit_bar["close"])
+                ):
+                    warnings.append(early_close_warning(day, exit_bar["timestamp"], session_close))
                 trades.append(trade)
         return trades, unique(warnings), skipped
 

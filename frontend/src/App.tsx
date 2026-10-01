@@ -171,6 +171,8 @@ export function App() {
   const [skipAshWednesday, setSkipAshWednesday] = useState(true);
   const [minBarCoverage, setMinBarCoverage] = useState(0.9);
   const [edgeTolerance, setEdgeTolerance] = useState(5);
+  const [openTolerance, setOpenTolerance] = useState(30);
+  const [closeTolerance, setCloseTolerance] = useState(15);
   const [fee, setFee] = useState(0.5);
   const [feePercent, setFeePercent] = useState(0);
   const [slippage, setSlippage] = useState(1);
@@ -284,11 +286,15 @@ export function App() {
   }
 
   function strategyParams(): Record<string, unknown> {
-    const coverage = {
+    const coverage: Record<string, unknown> = {
       quantity,
       min_bar_coverage: minBarCoverage,
       edge_tolerance_minutes: edgeTolerance,
     };
+    if (strategy === "gap_reversal" || strategy === "opening_range_breakout") {
+      coverage.open_tolerance_minutes = openTolerance;
+      coverage.close_tolerance_minutes = closeTolerance;
+    }
     if (strategy === "gap_reversal") {
       return { threshold: gapThreshold, exit: gapExit, ...coverage };
     }
@@ -463,7 +469,7 @@ export function App() {
                   </select>
                 </label>
                 <p className="hint">
-                  Gap = ln(abertura / fechamento anterior). Os limiares 0,5%, 1% e 1,5% são os mesmos para WIN e ações. A entrada é o open da primeira barra a partir de 1 minuto depois da abertura, dentro da tolerância de 5 minutos. O núcleo sai em 15 minutos; 30 minutos e o fim do dia (16:55, antes do leilão) são extras.
+                  Gap = ln(abertura / fechamento anterior). Os limiares 0,5%, 1% e 1,5% são os mesmos para WIN e ações. A entrada é a primeira barra que começa pelo menos 1 minuto depois do primeiro negócio, nunca a barra da abertura. O núcleo sai 15 minutos depois da entrada; 30 minutos e o fim do dia são extras.
                 </p>
                 <label>
                   Quantidade
@@ -482,7 +488,7 @@ export function App() {
                   </select>
                 </label>
                 <p className="hint">
-                  A máxima e a mínima dos primeiros minutos definem a faixa. O primeiro fechamento fora dela entra na barra seguinte, com stop no outro extremo. A saída forçada é às 16:55, no fim do contínuo antes do leilão do à vista, no WIN e nas ações. O núcleo é a faixa de 5 minutos; 15 e 30 minutos são extras. No máximo uma operação por pregão.
+                  A faixa começa no primeiro negócio e dura os minutos escolhidos. O primeiro fechamento fora dela entra na barra seguinte, com stop no outro extremo. A saída forçada é no fim do contínuo, às 16:55, ou no último negócio regular se o pregão parar antes. O núcleo é a faixa de 5 minutos; 15 e 30 minutos são extras. No máximo uma operação por pregão.
                 </p>
                 <label>
                   Quantidade
@@ -591,8 +597,36 @@ export function App() {
                 />
               </label>
             </div>
+            {strategy !== "intraday_momentum" && (
+              <div className="grid-2">
+                <label>
+                  Tolerância da abertura (min)
+                  <input
+                    type="number"
+                    min={0}
+                    max={180}
+                    step={1}
+                    value={openTolerance}
+                    onChange={(event) => setOpenTolerance(Number(event.target.value))}
+                  />
+                </label>
+                <label>
+                  Tolerância do fechamento (min)
+                  <input
+                    type="number"
+                    min={0}
+                    max={120}
+                    step={1}
+                    value={closeTolerance}
+                    onChange={(event) => setCloseTolerance(Number(event.target.value))}
+                  />
+                </label>
+              </div>
+            )}
             <p className="hint">
-              Cada janela precisa da barra de início, com essa tolerância, e da barra que fecha no fim. A fração é a cobertura mínima; zero desliga só a fração. Pregão incompleto é pulado e o motivo aparece no resultado.
+              {strategy === "intraday_momentum"
+                ? "Cada janela precisa da barra de início, com essa tolerância, e da barra que fecha no fim. A fração é a cobertura mínima; zero desliga só a fração. Pregão incompleto é pulado e o motivo aparece no resultado."
+                : "A abertura é o primeiro negócio, até 30 minutos depois do calendário. A faixa e a cobertura começam nele. A entrada do gap espera mais 1 minuto e não usa a barra da abertura. Se o contínuo para até 15 minutos antes do leilão, a posição sai no último negócio, com aviso."}
             </p>
           </fieldset>
           <fieldset>

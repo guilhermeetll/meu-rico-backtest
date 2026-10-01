@@ -224,12 +224,84 @@ def test_end_of_day_is_the_cash_call_for_the_win_and_for_stocks():
 def test_a_late_first_print_skips_the_signal_window():
     raw, _, skipped = _generate([
         *_prior(),
-        _flat(DAY, 9, 6, 100_000 * math.exp(0.02), "WINV26"),
+        _flat(DAY, 9, 31, 100_000 * math.exp(0.02), "WINV26"),
     ], {"exit": "eod"})
     assert raw == []
     assert len(skipped) == 1
     assert skipped[0].window == "signal"
     assert skipped[0].session_date == DAY
+    assert "30" in skipped[0].reason
+
+
+def test_entry_is_never_the_opening_bar():
+    opening = 100 * math.exp(0.02)
+    raw, _, skipped = _generate([
+        *_quiet_equity(),
+        _flat(DAY, 10, 3, opening),
+        _flat(DAY, 10, 4, 111),
+        _flat(DAY, 10, 18, 110),
+        _flat(DAY, 10, 19, 112),
+    ], {"exit": "15"}, instrument=PETR4)
+    assert [item for item in skipped if item.session_date == DAY] == []
+    assert len(raw) == 1
+    assert raw[0].entry_time.hour == 10 and raw[0].entry_time.minute == 4
+    assert raw[0].entry_price == 111
+    assert raw[0].entry_price != pytest.approx(opening)
+    assert raw[0].exit_time.minute == 19
+    assert raw[0].exit_price == 112
+    alone, _, alone_skipped = _generate([
+        *_quiet_equity(),
+        _flat(DAY, 10, 3, opening),
+    ], {"exit": "15"}, instrument=PETR4)
+    assert alone == []
+    assert any(item.window == "trade" and item.session_date == DAY for item in alone_skipped)
+
+
+def test_an_open_at_10_08_does_not_skip_the_day():
+    opening = 100 * math.exp(0.02)
+    raw, _, skipped = _generate([
+        *_quiet_equity(),
+        _flat(DAY, 10, 8, opening),
+        _flat(DAY, 10, 9, 111),
+        _flat(DAY, 10, 23, 110),
+        _flat(DAY, 10, 24, 112),
+    ], {"exit": "15"}, instrument=PETR4)
+    assert [item for item in skipped if item.session_date == DAY] == []
+    assert raw[0].entry_time.minute == 9
+    assert raw[0].entry_price == 111
+    win, _, win_skipped = _generate([
+        *_prior(),
+        _flat(DAY, 9, 2, 100_000 * math.exp(0.006), "WINV26"),
+        _flat(DAY, 9, 3, 100_250, "WINV26"),
+        _flat(DAY, 9, 17, 100_100, "WINV26"),
+        _flat(DAY, 9, 18, 100_050, "WINV26"),
+    ], {"exit": "15"})
+    assert [item for item in win_skipped if item.session_date == DAY] == []
+    assert win[0].entry_time.minute == 3
+    assert win[0].entry_price == 100_250
+    assert win[0].exit_time.minute == 18
+
+
+def test_continuous_ending_at_16_49_exits_there_and_does_not_skip():
+    raw, warnings, skipped = _generate([
+        *_quiet_equity(),
+        _flat(DAY, 10, 0, 100 * math.exp(0.02)),
+        _flat(DAY, 10, 1, 110),
+        _flat(DAY, 16, 49, 108),
+        _flat(DAY, 17, 5, 120),
+    ], {"exit": "eod"}, instrument=PETR4)
+    assert [item for item in skipped if item.session_date == DAY] == []
+    assert raw[0].exit_price == 108
+    assert raw[0].exit_time.hour == 16 and raw[0].exit_time.minute == 50
+    assert any("16:49" in warning and "pregão pulado" not in warning for warning in warnings)
+    too_early, _, too_skipped = _generate([
+        *_quiet_equity(),
+        _flat(DAY, 10, 0, 100 * math.exp(0.02)),
+        _flat(DAY, 10, 1, 110),
+        _flat(DAY, 16, 30, 108),
+    ], {"exit": "eod"}, instrument=PETR4)
+    assert too_early == []
+    assert any(item.window == "trade" and item.session_date == DAY for item in too_skipped)
 
 
 def test_day_without_a_prior_close_does_not_trade():
@@ -293,4 +365,3 @@ def test_thirty_minute_exit_and_a_hold_that_does_not_fit_the_bar():
     assert coarse == []
     day_skips = [item for item in skipped if item.session_date == DAY]
     assert day_skips[0].window == "trade"
-    assert "1 minuto" in day_skips[0].reason

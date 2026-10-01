@@ -1,10 +1,10 @@
 """Opening-gap reversal, pre-registered in docs/preregistro.md.
 
 Ceretta & Da Costa (2017), Economics Bulletin 37(4). The gap is the natural
-log of the opening print over the previous close of the same series. The
-core grid uses the same three thresholds for stocks and the WIN, enters on
-the bar that starts one minute after the regular open, and exits 15 minutes
-later. Thirty minutes and the end of continuous trading are extras.
+log of the first regular print over the previous close of the same series.
+Entry is the first bar that starts at least one minute after that print,
+never the opening bar itself. The core grid exits 15 minutes after the
+entry. Thirty minutes and the end of continuous trading are extras.
 """
 
 from __future__ import annotations
@@ -22,10 +22,15 @@ from engine.strategies.base import ParamField, Strategy
 from engine.strategies.common import (
     at,
     cash_call_start,
+    clock_tolerances,
     contract_of,
     coverage_params,
+    early_close_warning,
+    first_regular_bar,
+    forced_continuous_exit,
     hhmm,
     incomplete_window,
+    missing_open_reason,
     quantity_of,
     span,
     unique,
@@ -59,9 +64,10 @@ class GapReversalStrategy(Strategy):
     label = "Reversão do gap de abertura"
     description = (
         "Gap = ln(abertura / fechamento anterior). Os limiares são 0,5%, 1% "
-        "e 1,5%, iguais para WIN e ações. A entrada é o open da primeira barra "
-        "a partir de 1 minuto depois da abertura, dentro da tolerância. O núcleo sai 15 minutos depois; "
-        "30 minutos e o fim do contínuo, às 16:55 no pregão ordinário, são extras."
+        "e 1,5%, iguais para WIN e ações. A entrada é a primeira barra que "
+        "começa pelo menos 1 minuto depois do primeiro negócio, nunca a barra "
+        "da abertura. O núcleo sai 15 minutos depois da entrada; 30 minutos e "
+        "o fim do contínuo são extras."
     )
 
     def param_schema(self) -> list[ParamField]:
@@ -100,7 +106,25 @@ class GapReversalStrategy(Strategy):
                 5,
                 min=0,
                 max=120,
-                help="A abertura pode atrasar até esse tanto. No timeframe grosso, a entrada também.",
+                help="Dentro da janela já ancorada no primeiro negócio, a barra de início pode atrasar até esse tanto.",
+            ),
+            ParamField(
+                "open_tolerance_minutes",
+                "Tolerância da abertura (min)",
+                "int",
+                30,
+                min=0,
+                max=180,
+                help="O primeiro negócio pode sair até esse tanto depois da abertura do calendário. Depois disso o pregão é pulado.",
+            ),
+            ParamField(
+                "close_tolerance_minutes",
+                "Tolerância do fechamento (min)",
+                "int",
+                15,
+                min=0,
+                max=120,
+                help="Se a barra do call não existe, a saída é o último negócio regular dentro desse intervalo antes do leilão.",
             ),
         ]
 
@@ -116,8 +140,11 @@ class GapReversalStrategy(Strategy):
         threshold = _threshold(resolved["threshold"])
         quantity = quantity_of(resolved)
         min_coverage, edge_minutes = coverage_params(resolved)
+        open_minutes, close_minutes = clock_tolerances(resolved)
         bar_delta = timedelta(minutes=bar_minutes)
         edge = timedelta(minutes=edge_minutes)
+        open_tolerance = timedelta(minutes=open_minutes)
+        close_tolerance = timedelta(minutes=close_minutes)
         warnings: list[str] = []
         skipped: list[SkippedSession] = []
         trades: list[RawTrade] = []
@@ -136,9 +163,9 @@ class GapReversalStrategy(Strategy):
             open_t, _ = session_bounds(instrument.family, day, contract)
             session_open = at(day, open_t, tz)
             session_close = at(day, cash_call_start(day), tz)
-            opening = _opening_print(day_bars, session_open, edge, session_close)
+            opening = first_regular_bar(day_bars, session_open, session_close, open_tolerance)
             if opening is None:
-                reason = _missing_open_reason(day_bars, session_open, edge, edge_minutes)
+                reason = missing_open_reason(day_bars, session_open, open_tolerance, open_minutes)
                 warnings.append(f"{day.isoformat()}: pregão pulado. {reason}")
                 skipped.append(SkippedSession(session_date=day, window="signal", reason=f"{reason}."))
                 continue
@@ -164,32 +191,32 @@ class GapReversalStrategy(Strategy):
             else:
                 continue
 
-            scheduled = session_open + ENTRY_LAG
-            # The 09:01 bar is the entry when it exists. On the WIN the first
-            # print is often 09:02 or 09:03, still inside the same edge
-            # tolerance used for the opening bar. A later print is a skip.
-            entry_limit = scheduled + edge
-            entry = _first_between(day_bars, scheduled, entry_limit, session_close)
-            if entry is None:
+            open_ts = pd.Timestamp(opening["timestamp"])
+            entry_from = open_ts + ENTRY_LAG
+            entry = _first_from(day_bars, entry_from, session_close)
+            if entry is None or pd.Timestamp(entry["timestamp"]) <= open_ts:
                 reason = (
-                    f"Janela da operação {span(scheduled, entry_limit)}: sem a barra que começa "
-                    f"1 minuto depois da abertura ({hhmm(scheduled)})"
+                    f"Janela da operação a partir de {hhmm(entry_from)}: sem a barra que começa "
+                    f"pelo menos 1 minuto depois do primeiro negócio ({hhmm(open_ts)})"
                 )
                 warnings.append(f"{day.isoformat()}: pregão pulado. {reason}.")
                 skipped.append(SkippedSession(session_date=day, window="trade", reason=f"{reason}."))
                 continue
-            entry_ts = entry["timestamp"]
+            entry_ts = pd.Timestamp(entry["timestamp"])
             timed = exit_mode != "eod"
             if timed:
                 target = entry_ts + timedelta(minutes=int(exit_mode))
                 if target >= session_close:
                     timed = False
+            early_exit = None
             if timed:
                 exit_clock = entry_ts + timedelta(minutes=int(exit_mode))
                 window_end = exit_clock
             else:
-                exit_clock = session_close
-                window_end = session_close
+                exit_clock, early_exit, _early = forced_continuous_exit(
+                    day_bars, session_close, close_tolerance, bar_delta,
+                )
+                window_end = exit_clock if exit_clock is not None else session_close
             if window_end <= entry_ts:
                 reason = (
                     f"Janela da operação {span(entry_ts, session_close)}: a saída não fica "
@@ -220,14 +247,15 @@ class GapReversalStrategy(Strategy):
                 exit_price = float(exit_row["open"])
                 exit_time = exit_clock.to_pydatetime()
             else:
-                exit_row = _bar_ending_at(day_bars, exit_clock, bar_delta)
-                if exit_row is None:
-                    reason = f"Janela da operação {span(entry_ts, exit_clock)}: sem a barra que fecha na saída"
+                if early_exit is None:
+                    reason = f"Janela da operação {span(entry_ts, session_close)}: sem a barra que fecha na saída"
                     warnings.append(f"{day.isoformat()}: pregão pulado. {reason}.")
                     skipped.append(SkippedSession(session_date=day, window="trade", reason=f"{reason}."))
                     continue
-                exit_price = float(exit_row["close"])
+                exit_price = float(early_exit["close"])
                 exit_time = exit_clock.to_pydatetime()
+                if exit_clock != session_close:
+                    warnings.append(early_close_warning(day, early_exit["timestamp"], session_close))
             trades.append(
                 RawTrade(
                     session_date=day,
@@ -243,37 +271,9 @@ class GapReversalStrategy(Strategy):
         return trades, unique(warnings), skipped
 
 
-def _opening_print(day_bars: pd.DataFrame, session_open, edge: timedelta, session_close):
-    window = day_bars[
-        (day_bars["timestamp"] >= session_open)
-        & (day_bars["timestamp"] <= session_open + edge)
-        & (day_bars["timestamp"] < session_close)
-    ]
-    if window.empty:
-        return None
-    return window.sort_values("timestamp").iloc[0]
-
-
-def _missing_open_reason(day_bars: pd.DataFrame, session_open, edge: timedelta, edge_minutes: int) -> str:
-    label = hhmm(session_open)
-    later = day_bars[day_bars["timestamp"] > session_open + edge]
-    if not later.empty:
-        first = later.sort_values("timestamp").iloc[0]["timestamp"]
-        return (
-            f"Janela do sinal {span(session_open, session_open + edge)}: sem o preço de abertura "
-            f"(primeira barra às {hhmm(first)}, fora da tolerância de {edge_minutes} minutos "
-            f"a partir de {label})"
-        )
-    return (
-        f"Janela do sinal {span(session_open, session_open + edge)}: sem o preço de abertura "
-        f"dentro de {edge_minutes} minutos a partir de {label}"
-    )
-
-
-def _first_between(day_bars: pd.DataFrame, start, end, session_close):
+def _first_from(day_bars: pd.DataFrame, start, session_close):
     window = day_bars[
         (day_bars["timestamp"] >= start)
-        & (day_bars["timestamp"] <= end)
         & (day_bars["timestamp"] < session_close)
     ]
     if window.empty:
@@ -283,14 +283,6 @@ def _first_between(day_bars: pd.DataFrame, start, end, session_close):
 
 def _bar_starting_at(day_bars: pd.DataFrame, stamp):
     hits = day_bars.loc[day_bars["timestamp"] == stamp]
-    if hits.empty:
-        return None
-    return hits.iloc[0]
-
-
-def _bar_ending_at(day_bars: pd.DataFrame, exit_clock, bar_delta: timedelta):
-    target = exit_clock - bar_delta
-    hits = day_bars.loc[day_bars["timestamp"] == target]
     if hits.empty:
         return None
     return hits.iloc[0]
