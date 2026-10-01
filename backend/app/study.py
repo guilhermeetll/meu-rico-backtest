@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 for params, result in results:
                     for warning in result.warnings:
-                        if warning.startswith("Preenchimento do ORB") and warning not in fill_notes:
+                        if warning.startswith("Preenchimento do ") and warning not in fill_notes:
                             fill_notes.append(warning)
                     signal_skips = sum(1 for item in result.skipped if item.window == "signal")
                     trade_skips = sum(1 for item in result.skipped if item.window == "trade")

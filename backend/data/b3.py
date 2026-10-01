@@ -33,6 +33,46 @@ def meta_root() -> Path:
     return Path(os.environ.get("B3_META_ROOT", "/data/b3_ticks_meta"))
 
 
+class B3SessionTrades:
+    """One session of prints in memory. The previous session is dropped."""
+
+    def __init__(self, files: dict[tuple[date, str], Path], include_after_hours: bool):
+        self.files = files
+        self.include_after_hours = include_after_hours
+        self._key: tuple | None = None
+        self._frame: pd.DataFrame | None = None
+
+    def get(self, day, contract):
+        ticker = str(contract).upper() if contract else None
+        path = self.files.get((day, ticker)) if ticker else None
+        resolved = ticker
+        if path is None:
+            matches = [(name, item) for (session, name), item in self.files.items() if session == day]
+            if ticker is not None:
+                matches = [(name, item) for name, item in matches if name == ticker]
+            if len(matches) != 1:
+                self._key = (day, ticker)
+                self._frame = None
+                return None
+            resolved, path = matches[0]
+        key = (day, resolved)
+        if key == self._key:
+            return self._frame
+        try:
+            frame = read_trades(path, include_after_hours=self.include_after_hours)
+        except Exception as exc:  # noqa: BLE001 - the strategy falls back to OHLC
+            logger.warning("B3 trades unreadable for %s: %s", path, exc)
+            frame = None
+        if frame is not None and not frame.empty:
+            frame = frame.loc[:, ["timestamp", "price"]].copy()
+            frame["contract"] = resolved
+        else:
+            frame = None
+        self._key = key
+        self._frame = frame
+        return frame
+
+
 class B3TradesAdapter:
     """Reads original B3 trade ZIPs and downloads the ones that are missing.
 
@@ -76,11 +116,11 @@ class B3TradesAdapter:
         minutes = {"1min": 1, "5min": 5, "60min": 60}[request.timeframe]
         warnings: list[str] = []
         frames: list[pd.DataFrame] = []
-        trade_frames: list[pd.DataFrame] = []
+        files: dict[tuple[date, str], Path] = {}
         day = request.start
         while day <= request.end:
             if day.weekday() < 5:
-                frame, note, day_trades = self._load_day(
+                frame, note, ticker = self._load_day(
                     request.symbol,
                     day,
                     request.timeframe,
@@ -89,8 +129,10 @@ class B3TradesAdapter:
                 )
                 if frame is not None and not frame.empty:
                     frames.append(frame)
-                if day_trades is not None and not day_trades.empty:
-                    trade_frames.append(day_trades)
+                    if ticker:
+                        path = self.local_path(ticker, day)
+                        if _usable(path):
+                            files[(day, ticker.upper())] = path
                 if note:
                     warnings.append(note)
             day += timedelta(days=1)
@@ -110,7 +152,7 @@ class B3TradesAdapter:
             )
         if not request.include_after_hours:
             warnings.append("Negócios de after-market (TipoSessaoPregao 6) ficaram de fora das barras.")
-        trades = pd.concat(trade_frames, ignore_index=True) if trade_frames else None
+        trades = B3SessionTrades(files, request.include_after_hours) if files else None
         return LoadResult(bars=bars, warnings=_unique(warnings), trades=trades)
 
     def _load_day(self, symbol: str, day: date, timeframe: str, minutes: int, include_after_hours: bool):
@@ -139,20 +181,7 @@ class B3TradesAdapter:
             return None, f"{day.isoformat()}: não foi possível ler {path.name} ({exc.__class__.__name__}).", None
         if frame.empty:
             return None, f"{day.isoformat()}: {ticker} sem negócios do pregão regular.", None
-        day_trades = None
-        try:
-            day_trades = read_trades(path, include_after_hours=include_after_hours)
-        except Exception as exc:  # noqa: BLE001 - bars still run; ORB falls back to OHLC
-            logger.warning("B3 trades unreadable for %s: %s", path, exc)
-            note = (
-                f"{day.isoformat()}: não foi possível ler os negócios individuais de {ticker} "
-                f"({exc.__class__.__name__}). O ORB stop usa a aproximação OHLC nesse pregão."
-            )
-            return frame, note, None
-        if day_trades is not None and not day_trades.empty:
-            day_trades = day_trades.copy()
-            day_trades["contract"] = ticker.upper()
-        return frame, None, day_trades
+        return frame, None, ticker
 
     def local_path(self, ticker: str, day: date) -> Path:
         return self.root / ticker.upper() / f"{day.isoformat()}.zip"

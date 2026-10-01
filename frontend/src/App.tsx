@@ -474,7 +474,7 @@ export function App() {
                   </select>
                 </label>
                 <p className="hint">
-                  Gap = ln(abertura / fechamento anterior). Os limiares 0,5%, 1% e 1,5% são os mesmos para WIN e ações. A entrada é a primeira barra que começa pelo menos 1 minuto depois do primeiro negócio, nunca a barra da abertura. O núcleo sai 15 minutos depois da entrada; 30 minutos e o fim do dia são extras.
+                  Gap = abertura / fechamento anterior − 1. Os limiares 0,5%, 1% e 1,5% são os mesmos para WIN e ações. Com negócios do tickercsv, a entrada é o último negócio até 1 minuto depois do primeiro. Sem eles, é a primeira barra que começa pelo menos 1 minuto depois, nunca a barra da abertura. O núcleo sai 15 minutos depois da entrada; 30 minutos e o fim do dia são extras.
                 </p>
                 <label>
                   Quantidade

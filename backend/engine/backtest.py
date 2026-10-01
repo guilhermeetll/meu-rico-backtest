@@ -73,10 +73,49 @@ def run_backtest(
     if bar_minutes < 1:
         raise ValueError("Timeframe inválido.")
 
-    sessions = sorted(set(bars["timestamp"].dt.date))
     raw, warnings, skipped = strategy.generate(bars, params, instrument, bar_minutes, trades=trades)
-    trades = execute(raw, instrument, costs, symbol)
-    metrics, equity = performance(trades, sessions, initial_capital, tax_rate, n_trials)
+    return finish_backtest(
+        bars,
+        raw,
+        warnings,
+        skipped,
+        strategy,
+        params,
+        instrument,
+        costs,
+        symbol=symbol,
+        initial_capital=initial_capital,
+        tax_rate=tax_rate,
+        n_trials=n_trials,
+        bar_minutes=bar_minutes,
+        sample_split=sample_split,
+        walk_forward=walk_forward,
+        trade_source=trades,
+    )
+
+
+def finish_backtest(
+    bars,
+    raw,
+    warnings: list[str],
+    skipped,
+    strategy: Strategy,
+    params: dict,
+    instrument: InstrumentSpec,
+    costs: CostModel,
+    *,
+    symbol: str,
+    initial_capital: float,
+    tax_rate: float,
+    n_trials: int,
+    bar_minutes: int,
+    sample_split: SampleSplit | None = None,
+    walk_forward: WalkForwardConfig | None = None,
+    trade_source=None,
+) -> BacktestResult:
+    sessions = sorted(set(bars["timestamp"].dt.date))
+    executed = execute(raw, instrument, costs, symbol)
+    metrics, equity = performance(executed, sessions, initial_capital, tax_rate, n_trials)
 
     in_sample = out_of_sample = None
     split = sample_split or SampleSplit(enabled=False)
@@ -87,8 +126,8 @@ def run_backtest(
                 "A divisão dentro/fora da amostra ficou com um dos lados vazio e foi ignorada."
             )
         else:
-            in_sample = _segment(trades, ins, initial_capital, tax_rate, n_trials)
-            out_of_sample = _segment(trades, outs, initial_capital, tax_rate, n_trials)
+            in_sample = _segment(executed, ins, initial_capital, tax_rate, n_trials)
+            out_of_sample = _segment(executed, outs, initial_capital, tax_rate, n_trials)
             warnings.append(
                 "O IR de cada fatia é recalculado só com os pregões daquela fatia. "
                 "O prejuízo não atravessa o corte."
@@ -108,12 +147,12 @@ def run_backtest(
             n_trials=n_trials,
             bar_minutes=bar_minutes,
             config=walk_forward,
-            trades=trades,
+            trades=trade_source,
         )
         warnings.extend(wf_warnings)
 
     return BacktestResult(
-        trades=trades,
+        trades=executed,
         equity=equity,
         metrics=metrics,
         in_sample=in_sample,

@@ -93,8 +93,8 @@ def run_walk_forward(
         best_score: float | None = None
         for candidate in combos:
             raw, _, _ = strategy.generate(train_bars, candidate, instrument, bar_minutes, trades=trades)
-            trades = execute(raw, instrument, costs, symbol)
-            metrics, _ = performance(trades, train_dates, initial_capital, tax_rate, n_trials=1)
+            filled = execute(raw, instrument, costs, symbol)
+            metrics, _ = performance(filled, train_dates, initial_capital, tax_rate, n_trials=1)
             score = _score(metrics, metric_name)
             if score is None:
                 continue

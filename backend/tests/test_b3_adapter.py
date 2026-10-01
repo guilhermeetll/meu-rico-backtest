@@ -105,9 +105,10 @@ def test_local_zip_layout_is_read_without_download(tmp_path: Path, monkeypatch):
     assert len(result.bars) == 2
     assert result.bars["contract"].iloc[0] == "WINV26"
     assert str(result.bars["timestamp"].dt.tz) == "America/Sao_Paulo"
-    assert list(result.trades["price"]) == [184700, 184710, 184705]
-    assert result.trades["contract"].iloc[0] == "WINV26"
-    assert str(result.trades["timestamp"].iloc[0]).startswith("2026-09-30 09:00:00")
+    prints = result.trades.get(date(2026, 9, 30), "WINV26")
+    assert list(prints["price"]) == [184700, 184710, 184705]
+    assert prints["contract"].iloc[0] == "WINV26"
+    assert str(prints["timestamp"].iloc[0]).startswith("2026-09-30 09:00:00")
 
 
 def test_download_uses_the_zip_layout(tmp_path: Path, monkeypatch):

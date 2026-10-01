@@ -7,6 +7,7 @@ import pytest
 from engine.costs import CostModel, apply_costs
 from engine.instruments import resolve_instrument
 from engine.strategies.orb import OpeningRangeBreakoutStrategy
+from engine.study import run_study
 
 TZ = ZoneInfo("America/Sao_Paulo")
 WIN = resolve_instrument("WIN")
@@ -242,10 +243,14 @@ def test_touching_the_edge_does_not_enter():
     ], instrument=PETR4)
     prints = pd.DataFrame({
         "timestamp": [
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 0, 0, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 0, 30, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 1, 0, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 4, 0, tzinfo=TZ)),
             pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 5, 1, tzinfo=TZ)),
             pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 16, 54, 10, tzinfo=TZ)),
         ],
-        "price": [11.0, 10.0],
+        "price": [10.0, 11.0, 9.0, 10.0, 11.0, 10.0],
     })
     from_ticks, _, tick_skipped = OpeningRangeBreakoutStrategy().generate(
         _frame([
@@ -359,13 +364,17 @@ def test_tickercsv_uses_the_first_real_print_not_the_edge():
     ]
     trades = pd.DataFrame({
         "timestamp": [
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 0, 0, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 0, 10, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 0, 20, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 4, 30, tzinfo=TZ)),
             pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 5, 0, tzinfo=TZ)),
             pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 5, 1, tzinfo=TZ)),
             pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 5, 40, tzinfo=TZ)),
             pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 16, 54, 10, tzinfo=TZ)),
         ],
-        "price": [11.0, 11.4, 8.7, 12.0],
-        "contract": ["PETR4", "PETR4", "PETR4", "PETR4"],
+        "price": [10.0, 11.0, 9.0, 10.0, 11.0, 11.4, 8.7, 12.0],
+        "contract": ["PETR4"] * 8,
     })
     raw, warnings, skipped = OpeningRangeBreakoutStrategy().generate(
         _frame(rows),
@@ -383,3 +392,82 @@ def test_tickercsv_uses_the_first_real_print_not_the_edge():
     assert paid.entry_price_effective == pytest.approx(11.41)
     assert paid.exit_price_effective == pytest.approx(8.69)
     assert any("tickercsv" in item for item in warnings)
+
+
+def test_first_print_at_09_02_58_keeps_the_next_five_minutes_inside_the_range():
+    """A print at 09:07:30 is still inside [09:02:58, 09:07:58). The bar minute is not."""
+    rows = [
+        _bar(DAY, 9, 2, 100, 110, 90, 100),
+        _bar(DAY, 9, 6, 100, 100, 100, 100),
+        _bar(DAY, 9, 7, 100, 100, 80, 90),
+        _tail(),
+    ]
+    prints = pd.DataFrame({
+        "timestamp": [
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 9, 2, 58, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 9, 3, 10, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 9, 4, 0, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 9, 7, 30, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 9, 7, 58, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 16, 54, 20, tzinfo=TZ)),
+        ],
+        "price": [100, 110, 90, 80, 70, 75],
+    })
+    bars_only, _, skipped = _generate(rows)
+    from_ticks, _, tick_skipped = OpeningRangeBreakoutStrategy().generate(
+        _frame(rows),
+        {"min_bar_coverage": 0, "range_minutes": 5, "execution": "stop"},
+        WIN,
+        1,
+        trades=prints,
+    )
+    assert skipped == [] and tick_skipped == []
+    assert bars_only[0].direction == -1
+    assert bars_only[0].entry_time.hour == 9 and bars_only[0].entry_time.minute == 7
+    assert bars_only[0].entry_time.second == 0
+    assert from_ticks[0].direction == -1
+    assert from_ticks[0].entry_price == 70
+    assert from_ticks[0].entry_time.hour == 9
+    assert from_ticks[0].entry_time.minute == 7 and from_ticks[0].entry_time.second == 58
+    assert from_ticks[0].exit_price == 75
+    assert from_ticks[0].entry_time != bars_only[0].entry_time
+
+
+def test_study_reads_each_session_once_for_every_variant():
+    rows = [
+        _bar(DAY, 9, 0, 100, 101, 99, 100),
+        _bar(DAY, 9, 4, 100, 101, 99, 100),
+        _bar(DAY, 9, 5, 102, 103, 102, 103),
+        _tail(104, 104, 104),
+    ]
+
+    class Counting:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, day, contract):
+            self.calls.append(day)
+            return None
+
+    source = Counting()
+    variants = [
+        {"range_minutes": 5, "execution": "stop", "min_bar_coverage": 0},
+        {"range_minutes": 15, "execution": "stop", "min_bar_coverage": 0},
+        {"range_minutes": 30, "execution": "stop", "min_bar_coverage": 0},
+    ]
+    trials, results = run_study(
+        _frame(rows),
+        OpeningRangeBreakoutStrategy(),
+        variants,
+        WIN,
+        CostModel(0.50, 1),
+        symbol="WIN",
+        initial_capital=10_000,
+        tax_rate=0.0,
+        n_trials=1,
+        bar_minutes=1,
+        trades=source,
+    )
+    assert trials == 3
+    assert len(results) == 3
+    assert source.calls == [DAY]

@@ -1,4 +1,3 @@
-import math
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -73,13 +72,13 @@ def _generate(rows: list[dict], params: dict | None = None, instrument=WIN, minu
 
 def test_thresholds_are_the_same_three_for_every_instrument():
     assert GAP_THRESHOLDS == (0.005, 0.01, 0.015)
-    assert math.log(1.005) < 0.005
+    assert 1.005 - 1 == pytest.approx(0.005)
     assert resolve_instrument("BOVA11").family != "WIN"
 
 
 def test_gap_above_threshold_sells_and_gap_below_buys():
-    above = 100_000 * math.exp(0.006)
-    below = 100_000 * math.exp(-0.006)
+    above = 100_000 * 1.006
+    below = 100_000 * 0.994
     short, _, _ = _generate([
         *_prior(),
         _bar(DAY, 9, 0, above, above, above, above, "WINV26"),
@@ -101,7 +100,7 @@ def test_gap_above_threshold_sells_and_gap_below_buys():
 
 
 def test_gap_inside_the_threshold_does_not_trade():
-    inside = 100_000 * math.exp(0.004)
+    inside = 100_000 * 1.004
     raw, warnings, skipped = _generate([
         *_prior(),
         _flat(DAY, 9, 0, inside, "WINV26"),
@@ -114,20 +113,20 @@ def test_gap_inside_the_threshold_does_not_trade():
 
 
 def test_the_same_threshold_applies_to_the_win_and_to_the_stock():
-    """ln(1.01) is above 0.5% and below 1% for both families."""
+    """A simple 0.9% gap is above 0.5% and below 1% for both families."""
     win_rows = [
-        *_prior(100),
-        _flat(DAY, 9, 0, 101, "WINV26"),
-        _flat(DAY, 9, 1, 101, "WINV26"),
-        _flat(DAY, 9, 15, 101, "WINV26"),
-        _flat(DAY, 9, 16, 101, "WINV26"),
+        *_prior(100_000),
+        _flat(DAY, 9, 0, 100_900, "WINV26"),
+        _flat(DAY, 9, 1, 100_900, "WINV26"),
+        _flat(DAY, 9, 15, 100_900, "WINV26"),
+        _flat(DAY, 9, 16, 100_900, "WINV26"),
     ]
     stock_rows = [
         *_quiet_equity(),
-        _flat(DAY, 10, 0, 101),
-        _flat(DAY, 10, 1, 101),
-        _flat(DAY, 10, 15, 101),
-        _flat(DAY, 10, 16, 101),
+        _flat(DAY, 10, 0, 100.9),
+        _flat(DAY, 10, 1, 100.9),
+        _flat(DAY, 10, 15, 100.9),
+        _flat(DAY, 10, 16, 100.9),
     ]
     win_loose, _, _ = _generate(win_rows, {"exit": "15", "threshold": 0.005}, instrument=WIN)
     stock_loose, _, _ = _generate(stock_rows, {"exit": "15", "threshold": 0.005}, instrument=PETR4)
@@ -162,7 +161,7 @@ def test_entry_is_the_bar_one_minute_after_the_open_and_exit_is_fifteen_minutes_
 def test_a_missing_09_01_bar_uses_the_next_print_inside_the_tolerance():
     raw, _, skipped = _generate([
         *_prior(),
-        _flat(DAY, 9, 0, 100_000 * math.exp(0.006), "WINV26"),
+        _flat(DAY, 9, 0, 100_000 * 1.006, "WINV26"),
         _flat(DAY, 9, 2, 100_300, "WINV26"),
         _flat(DAY, 9, 16, 100_100, "WINV26"),
         _flat(DAY, 9, 17, 100_050, "WINV26"),
@@ -175,7 +174,7 @@ def test_a_missing_09_01_bar_uses_the_next_print_inside_the_tolerance():
     assert raw[0].exit_price == 100_050
     late, _, late_skipped = _generate([
         *_prior(),
-        _flat(DAY, 9, 0, 100_000 * math.exp(0.006), "WINV26"),
+        _flat(DAY, 9, 0, 100_000 * 1.006, "WINV26"),
         _flat(DAY, 9, 7, 100_300, "WINV26"),
     ], {"exit": "15"})
     assert late == []
@@ -185,7 +184,7 @@ def test_a_missing_09_01_bar_uses_the_next_print_inside_the_tolerance():
 def test_five_minute_bars_skip_the_opening_bar_and_enter_on_the_next_one():
     rows = [
         *_quiet_equity(),
-        _bar(DAY, 10, 0, 100 * math.exp(0.006), 100 * math.exp(0.006), 100 * math.exp(0.006), 100 * math.exp(0.006)),
+        _bar(DAY, 10, 0, 100 * 1.006, 100 * 1.006, 100 * 1.006, 100 * 1.006),
         _bar(DAY, 10, 5, 111, 111, 111, 111),
         _bar(DAY, 10, 15, 111, 111, 111, 111),
         _bar(DAY, 10, 20, 112, 112, 112, 112),
@@ -202,14 +201,14 @@ def test_five_minute_bars_skip_the_opening_bar_and_enter_on_the_next_one():
 def test_end_of_day_is_the_cash_call_for_the_win_and_for_stocks():
     win, _, _ = _generate([
         *_prior(),
-        _flat(DAY, 9, 0, 100_000 * math.exp(0.006), "WINV26"),
+        _flat(DAY, 9, 0, 100_000 * 1.006, "WINV26"),
         _flat(DAY, 9, 1, 100_100, "WINV26"),
         _flat(DAY, 16, 54, 100_050, "WINV26"),
         _flat(DAY, 18, 24, 100_900, "WINV26"),
     ], {"exit": "eod"})
     stock, _, _ = _generate([
         *_quiet_equity(),
-        _flat(DAY, 10, 0, 100 * math.exp(0.02)),
+        _flat(DAY, 10, 0, 100 * 1.02),
         _flat(DAY, 10, 1, 110),
         _flat(DAY, 16, 54, 108),
     ], {"exit": "eod"}, instrument=PETR4)
@@ -224,7 +223,7 @@ def test_end_of_day_is_the_cash_call_for_the_win_and_for_stocks():
 def test_a_late_first_print_skips_the_signal_window():
     raw, _, skipped = _generate([
         *_prior(),
-        _flat(DAY, 9, 31, 100_000 * math.exp(0.02), "WINV26"),
+        _flat(DAY, 9, 31, 100_000 * 1.02, "WINV26"),
     ], {"exit": "eod"})
     assert raw == []
     assert len(skipped) == 1
@@ -234,7 +233,7 @@ def test_a_late_first_print_skips_the_signal_window():
 
 
 def test_entry_is_never_the_opening_bar():
-    opening = 100 * math.exp(0.02)
+    opening = 100 * 1.02
     raw, _, skipped = _generate([
         *_quiet_equity(),
         _flat(DAY, 10, 3, opening),
@@ -258,7 +257,7 @@ def test_entry_is_never_the_opening_bar():
 
 
 def test_an_open_at_10_08_does_not_skip_the_day():
-    opening = 100 * math.exp(0.02)
+    opening = 100 * 1.02
     raw, _, skipped = _generate([
         *_quiet_equity(),
         _flat(DAY, 10, 8, opening),
@@ -271,7 +270,7 @@ def test_an_open_at_10_08_does_not_skip_the_day():
     assert raw[0].entry_price == 111
     win, _, win_skipped = _generate([
         *_prior(),
-        _flat(DAY, 9, 2, 100_000 * math.exp(0.006), "WINV26"),
+        _flat(DAY, 9, 2, 100_000 * 1.006, "WINV26"),
         _flat(DAY, 9, 3, 100_250, "WINV26"),
         _flat(DAY, 9, 17, 100_100, "WINV26"),
         _flat(DAY, 9, 18, 100_050, "WINV26"),
@@ -285,7 +284,7 @@ def test_an_open_at_10_08_does_not_skip_the_day():
 def test_continuous_ending_at_16_49_exits_there_and_does_not_skip():
     raw, warnings, skipped = _generate([
         *_quiet_equity(),
-        _flat(DAY, 10, 0, 100 * math.exp(0.02)),
+        _flat(DAY, 10, 0, 100 * 1.02),
         _flat(DAY, 10, 1, 110),
         _flat(DAY, 16, 49, 108),
         _flat(DAY, 17, 5, 120),
@@ -296,7 +295,7 @@ def test_continuous_ending_at_16_49_exits_there_and_does_not_skip():
     assert any("16:49" in warning and "pregão pulado" not in warning for warning in warnings)
     too_early, _, too_skipped = _generate([
         *_quiet_equity(),
-        _flat(DAY, 10, 0, 100 * math.exp(0.02)),
+        _flat(DAY, 10, 0, 100 * 1.02),
         _flat(DAY, 10, 1, 110),
         _flat(DAY, 16, 30, 108),
     ], {"exit": "eod"}, instrument=PETR4)
@@ -335,7 +334,7 @@ def test_same_contract_prior_close_is_used():
     rows = [
         _flat(PRIOR, 18, 24, 100_000, "WINV26"),
         _flat(PRIOR, 18, 24, 50_000, "WINZ26"),
-        _flat(DAY, 9, 0, 100_000 * math.exp(0.006), "WINV26"),
+        _flat(DAY, 9, 0, 100_000 * 1.006, "WINV26"),
         _flat(DAY, 9, 1, 100_200, "WINV26"),
         _flat(DAY, 9, 15, 100_100, "WINV26"),
         _flat(DAY, 9, 16, 100_100, "WINV26"),
@@ -348,7 +347,7 @@ def test_same_contract_prior_close_is_used():
 def test_thirty_minute_exit_and_a_hold_that_does_not_fit_the_bar():
     raw, _, _ = _generate([
         *_prior(),
-        _flat(DAY, 9, 0, 100_000 * math.exp(0.006), "WINV26"),
+        _flat(DAY, 9, 0, 100_000 * 1.006, "WINV26"),
         _flat(DAY, 9, 1, 100_200, "WINV26"),
         _flat(DAY, 9, 30, 100_150, "WINV26"),
         _bar(DAY, 9, 31, 100_140, 100_140, 100_140, 100_140, "WINV26"),
@@ -358,10 +357,74 @@ def test_thirty_minute_exit_and_a_hold_that_does_not_fit_the_bar():
     coarse, _, skipped = _generate([
         _flat(EARLIER, 10, 0, 100),
         _flat(PRIOR, 10, 0, 100),
-        _flat(DAY, 10, 0, 100 * math.exp(0.02)),
+        _flat(DAY, 10, 0, 100 * 1.02),
         _flat(DAY, 11, 0, 110),
         _flat(DAY, 16, 0, 108),
     ], {"exit": "15"}, instrument=PETR4, minutes=60)
     assert coarse == []
     day_skips = [item for item in skipped if item.session_date == DAY]
     assert day_skips[0].window == "trade"
+
+
+def _print(day, hour, minute, second, price, contract="WINV26"):
+    return {
+        "timestamp": pd.Timestamp(datetime(day.year, day.month, day.day, hour, minute, second, tzinfo=TZ)),
+        "price": price,
+        "contract": contract,
+    }
+
+
+def test_ticks_anchor_on_the_exact_first_print_at_09_02_58():
+    """Entry is the last print up to t0 + 1 min. A print at 09:04 is too late."""
+    bars = [
+        *_prior(),
+        _flat(DAY, 9, 2, 100_500, "WINV26"),
+        _flat(DAY, 9, 3, 100_400, "WINV26"),
+        _flat(DAY, 9, 17, 100_200, "WINV26"),
+        _flat(DAY, 9, 18, 100_100, "WINV26"),
+        _flat(DAY, 9, 32, 100_050, "WINV26"),
+        _flat(DAY, 9, 33, 100_040, "WINV26"),
+    ]
+    prints = pd.DataFrame([
+        _print(DAY, 9, 2, 58, 100_500),
+        _print(DAY, 9, 3, 20, 100_450),
+        _print(DAY, 9, 3, 58, 100_420),
+        _print(DAY, 9, 4, 5, 100_410),
+        _print(DAY, 9, 18, 30, 100_200),
+        _print(DAY, 9, 18, 58, 100_150),
+        _print(DAY, 9, 19, 10, 100_100),
+        _print(DAY, 9, 33, 58, 100_080),
+        _print(DAY, 9, 34, 1, 100_070),
+    ])
+    bars_only, _, _ = _generate(bars, {"exit": "15", "threshold": 0.005})
+    from_ticks, warnings, skipped = GapReversalStrategy().generate(
+        _frame(bars),
+        {"min_bar_coverage": 0, "exit": "15", "threshold": 0.005},
+        WIN,
+        1,
+        trades=prints,
+    )
+    held, _, _ = GapReversalStrategy().generate(
+        _frame(bars),
+        {"min_bar_coverage": 0, "exit": "30", "threshold": 0.005},
+        WIN,
+        1,
+        trades=prints,
+    )
+    assert [item for item in skipped if item.session_date == DAY] == []
+    assert bars_only[0].entry_price == 100_400
+    assert bars_only[0].entry_time.minute == 3 and bars_only[0].entry_time.second == 0
+    assert bars_only[0].exit_price == 100_100
+    assert bars_only[0].exit_time.minute == 18 and bars_only[0].exit_time.second == 0
+    assert from_ticks[0].signal_return == pytest.approx(0.005)
+    assert from_ticks[0].direction == -1
+    assert from_ticks[0].entry_price == 100_420
+    assert from_ticks[0].entry_time.hour == 9
+    assert from_ticks[0].entry_time.minute == 3 and from_ticks[0].entry_time.second == 58
+    assert from_ticks[0].exit_price == 100_150
+    assert from_ticks[0].exit_time.minute == 18 and from_ticks[0].exit_time.second == 58
+    assert held[0].entry_price == 100_420
+    assert held[0].exit_price == 100_080
+    assert held[0].exit_time.minute == 33 and held[0].exit_time.second == 58
+    assert any("tickercsv" in warning for warning in warnings)
+    assert any("aproximação por barra" in warning for warning in _generate(bars, {"exit": "15"})[1])

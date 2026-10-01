@@ -1,13 +1,15 @@
 """Opening-range breakout, the control strategy in docs/preregistro.md.
 
 The range is the high and the low from the first regular print through the
-next N minutes, N in {5, 15, 30}. The core buys only above the high and
-sells only below the low. Touching the edge is not an entry. On OHLC bars
-the raw fill is one tick beyond that edge, unless the bar already opened
-further out, and the cost model then adds another tick of slippage. A
-tickercsv print is used as-is and only the cost-model tick is added. The
-stop still fires on a touch. `execution=confirm` keeps the previous rule
-(a close outside the range, filled on the next bar's open) as the extra
+next N minutes, N in {5, 15, 30}. With tickercsv prints, t0 is that print's
+exact timestamp and the range is [t0, t0 + N). A breakout is a later print.
+Without individual trades, t0 is the minute of the first bar. The core buys
+only above the high and sells only below the low. Touching the edge is not
+an entry. On OHLC bars the raw fill is one tick beyond that edge, unless the
+bar already opened further out, and the cost model then adds another tick of
+slippage. A tickercsv print is used as-is and only the cost-model tick is
+added. The stop still fires on a touch. `execution=confirm` keeps the previous
+rule (a close outside the range, filled on the next bar's open) as the extra
 named orb_confirm. There is no target. Whatever is left exits at the end of
 continuous trading.
 """
@@ -38,6 +40,7 @@ from engine.strategies.common import (
     span,
     unique,
 )
+from engine.trades import as_lookup, first_regular_trade
 
 RANGE_MINUTES = (5, 15, 30)
 EXECUTIONS = ("stop", "confirm")
@@ -157,147 +160,180 @@ class OpeningRangeBreakoutStrategy(Strategy):
         bar_minutes: int,
         trades=None,
     ) -> tuple[list[RawTrade], list[str], list[SkippedSession]]:
-        resolved = self.resolved_params(params)
-        range_minutes = _range_minutes(resolved["range_minutes"])
-        execution = _execution(resolved["execution"])
-        quantity = quantity_of(resolved)
-        min_coverage, edge_minutes = coverage_params(resolved)
-        open_minutes, close_minutes = clock_tolerances(resolved)
-        bar_delta = timedelta(minutes=bar_minutes)
-        edge = timedelta(minutes=edge_minutes)
-        open_tolerance = timedelta(minutes=open_minutes)
-        close_tolerance = timedelta(minutes=close_minutes)
-        use_ticks = trades is not None and len(trades) > 0 and execution == "stop"
-        warnings: list[str] = []
-        skipped: list[SkippedSession] = []
-        raw_trades: list[RawTrade] = []
-        ohlc_fallback_days: list[str] = []
+        return self.generate_many(bars, [params], instrument, bar_minutes, as_lookup(trades))[0]
 
+    def generate_many(self, bars, variants: list[dict], instrument: InstrumentSpec, bar_minutes: int, lookup):
+        """One pass over the sessions. Every variant shares that day's prints."""
+        runs = [
+            self._begin(params, instrument, bar_minutes, lookup is not None)
+            for params in variants
+        ]
         frame = bars.sort_values("timestamp")
         tz = frame["timestamp"].dt.tz
         for day, day_bars in frame.groupby(frame["timestamp"].dt.date, sort=True):
             ordered = day_bars.sort_values("timestamp")
             series = contracts_of(ordered)
-            if len(series) > 1:
-                warnings.append(
-                    f"{day.isoformat()}: o pregão mistura {', '.join(series)}. "
-                    "Sinal pulado para não transformar o salto entre contratos em retorno."
-                )
-                continue
-            contract = series[0] if series else contract_of(ordered)
-            open_t, _ = session_bounds(instrument.family, day, contract)
-            session_open = at(day, open_t, tz)
-            session_close = at(day, cash_call_start(day), tz)
-            opening = first_regular_bar(ordered, session_open, session_close, open_tolerance)
-            if opening is None:
-                reason = missing_open_reason(ordered, session_open, open_tolerance, open_minutes)
-                warnings.append(f"{day.isoformat()}: pregão pulado. {reason}")
-                skipped.append(SkippedSession(session_date=day, window="signal", reason=f"{reason}."))
-                continue
-            range_start = pd.Timestamp(opening["timestamp"])
-            range_end = range_start + timedelta(minutes=range_minutes)
-            if range_end >= session_close:
-                warnings.append(
-                    f"{day.isoformat()}: a faixa de {range_minutes} minutos não cabe antes do fechamento."
-                )
-                continue
-            exit_clock, exit_bar, early = forced_continuous_exit(
-                ordered, session_close, close_tolerance, bar_delta,
-            )
-            trade_end = exit_clock if exit_clock is not None else session_close
-            gaps = []
-            signal_gap = incomplete_window(
-                ordered["timestamp"], range_start, range_end, bar_delta, edge,
-                min_coverage, bar_minutes, edge_minutes,
-            )
-            if signal_gap:
-                gaps.append(f"Janela do sinal {span(range_start, range_end)}: {signal_gap}")
-            trade_gap = incomplete_window(
-                ordered["timestamp"], range_end, trade_end, bar_delta, edge,
-                min_coverage, bar_minutes, edge_minutes,
-            )
-            if trade_gap:
-                gaps.append(f"Janela da operação {span(range_end, trade_end)}: {trade_gap}")
-            if gaps:
-                warnings.append(f"{day.isoformat()}: pregão pulado. {'. '.join(gaps)}.")
-                if signal_gap:
-                    skipped.append(SkippedSession(
-                        session_date=day,
-                        window="signal",
-                        reason=f"Janela do sinal {span(range_start, range_end)}: {signal_gap}.",
-                    ))
-                if trade_gap:
-                    skipped.append(SkippedSession(
-                        session_date=day,
-                        window="trade",
-                        reason=f"Janela da operação {span(range_end, trade_end)}: {trade_gap}.",
-                    ))
-                continue
+            contract = series[0] if len(series) == 1 else None
+            day_trades = None
+            if lookup is not None and len(series) <= 1:
+                day_trades = lookup.get(day, contract)
+            for run in runs:
+                self._on_day(run, ordered, day, tz, day_trades)
+        return [self._end(run) for run in runs]
 
-            ranged = ordered[(ordered["timestamp"] >= range_start) & (ordered["timestamp"] < range_end)]
-            if ranged.empty:
-                continue
-            range_high = float(ranged["high"].max())
-            range_low = float(ranged["low"].min())
-            if range_high <= 0 or range_low <= 0 or range_high < range_low:
-                warnings.append(f"{day.isoformat()}: faixa de abertura sem preço válido. Sinal pulado.")
-                continue
+    def _begin(self, params: dict, instrument: InstrumentSpec, bar_minutes: int, ticks_available: bool) -> dict:
+        resolved = self.resolved_params(params)
+        open_minutes, close_minutes = clock_tolerances(resolved)
+        min_coverage, edge_minutes = coverage_params(resolved)
+        execution = _execution(resolved["execution"])
+        return {
+            "instrument": instrument,
+            "range_minutes": _range_minutes(resolved["range_minutes"]),
+            "execution": execution,
+            "quantity": quantity_of(resolved),
+            "min_coverage": min_coverage,
+            "edge_minutes": edge_minutes,
+            "open_minutes": open_minutes,
+            "bar_minutes": bar_minutes,
+            "bar_delta": timedelta(minutes=bar_minutes),
+            "edge": timedelta(minutes=edge_minutes),
+            "open_tolerance": timedelta(minutes=open_minutes),
+            "close_tolerance": timedelta(minutes=close_minutes),
+            "use_ticks": ticks_available and execution == "stop",
+            "warnings": [],
+            "skipped": [],
+            "raw": [],
+            "fallback_days": [],
+        }
 
-            after = ordered[(ordered["timestamp"] >= range_end) & (ordered["timestamp"] < session_close)]
-            if execution == "confirm":
-                trade = _first_breakout(
-                    after, range_high, range_low, trade_end, bar_delta, quantity, day,
-                )
-            else:
-                day_trades = _session_trades(trades, day, contract) if use_ticks else None
-                if day_trades is not None:
-                    trade = _stop_order_from_trades(
-                        day_trades, range_high, range_low, range_end, trade_end, quantity, day,
-                    )
-                else:
-                    if use_ticks:
-                        ohlc_fallback_days.append(day.isoformat())
-                    trade = _stop_order(
-                        after, range_high, range_low, trade_end, bar_delta, quantity, day,
-                        instrument.tick_size,
-                    )
-            if trade is not None:
-                if (
-                    early
-                    and exit_bar is not None
-                    and pd.Timestamp(trade.exit_time) == pd.Timestamp(trade_end)
-                    and float(trade.exit_price) == float(exit_bar["close"])
-                ):
-                    warnings.append(early_close_warning(day, exit_bar["timestamp"], session_close))
-                raw_trades.append(trade)
-        if execution == "stop":
-            if use_ticks:
-                warnings.append(TICK_FILL_NOTE)
-                if ohlc_fallback_days:
-                    warnings.append(
+    def _end(self, run: dict):
+        if run["execution"] == "stop":
+            if run["use_ticks"]:
+                run["warnings"].append(TICK_FILL_NOTE)
+                if run["fallback_days"]:
+                    run["warnings"].append(
                         "Preenchimento do ORB: sem negócio individual em "
-                        + ", ".join(ohlc_fallback_days)
+                        + ", ".join(run["fallback_days"])
                         + ". Nesses pregões a entrada usou a aproximação OHLC."
                     )
             else:
-                warnings.append(OHLC_FILL_NOTE)
-        return raw_trades, unique(warnings), skipped
+                run["warnings"].append(OHLC_FILL_NOTE)
+        return run["raw"], unique(run["warnings"]), run["skipped"]
 
+    def _on_day(self, run: dict, ordered, day, tz, day_trades) -> None:
+        instrument = run["instrument"]
+        warnings = run["warnings"]
+        skipped = run["skipped"]
+        range_minutes = run["range_minutes"]
+        bar_delta = run["bar_delta"]
+        series = contracts_of(ordered)
+        if len(series) > 1:
+            warnings.append(
+                f"{day.isoformat()}: o pregão mistura {', '.join(series)}. "
+                "Sinal pulado para não transformar o salto entre contratos em retorno."
+            )
+            return
+        contract = series[0] if series else contract_of(ordered)
+        open_t, _ = session_bounds(instrument.family, day, contract)
+        session_open = at(day, open_t, tz)
+        session_close = at(day, cash_call_start(day), tz)
+        opening = first_regular_bar(ordered, session_open, session_close, run["open_tolerance"])
+        if opening is None:
+            reason = missing_open_reason(ordered, session_open, run["open_tolerance"], run["open_minutes"])
+            warnings.append(f"{day.isoformat()}: pregão pulado. {reason}")
+            skipped.append(SkippedSession(session_date=day, window="signal", reason=f"{reason}."))
+            return
+        # Coverage stays on the bar that contains the open. The prices use t0.
+        bar_start = pd.Timestamp(opening["timestamp"])
+        bar_end = bar_start + timedelta(minutes=range_minutes)
+        anchor = first_regular_trade(day_trades, session_open, session_close, run["open_tolerance"])
+        if anchor is not None:
+            day_trades = day_trades.sort_values("timestamp", kind="mergesort")
+            range_start = pd.Timestamp(anchor["timestamp"])
+            range_end = range_start + timedelta(minutes=range_minutes)
+        else:
+            range_start = bar_start
+            range_end = bar_end
+        if range_end >= session_close or bar_end >= session_close:
+            warnings.append(
+                f"{day.isoformat()}: a faixa de {range_minutes} minutos não cabe antes do fechamento."
+            )
+            return
+        exit_clock, exit_bar, early = forced_continuous_exit(
+            ordered, session_close, run["close_tolerance"], bar_delta,
+        )
+        trade_end = exit_clock if exit_clock is not None else session_close
+        gaps = []
+        signal_gap = incomplete_window(
+            ordered["timestamp"], bar_start, bar_end, bar_delta, run["edge"],
+            run["min_coverage"], run["bar_minutes"], run["edge_minutes"],
+        )
+        if signal_gap:
+            gaps.append(f"Janela do sinal {span(bar_start, bar_end)}: {signal_gap}")
+        trade_gap = incomplete_window(
+            ordered["timestamp"], bar_end, trade_end, bar_delta, run["edge"],
+            run["min_coverage"], run["bar_minutes"], run["edge_minutes"],
+        )
+        if trade_gap:
+            gaps.append(f"Janela da operação {span(bar_end, trade_end)}: {trade_gap}")
+        if gaps:
+            warnings.append(f"{day.isoformat()}: pregão pulado. {'. '.join(gaps)}.")
+            if signal_gap:
+                skipped.append(SkippedSession(
+                    session_date=day,
+                    window="signal",
+                    reason=f"Janela do sinal {span(bar_start, bar_end)}: {signal_gap}.",
+                ))
+            if trade_gap:
+                skipped.append(SkippedSession(
+                    session_date=day,
+                    window="trade",
+                    reason=f"Janela da operação {span(bar_end, trade_end)}: {trade_gap}.",
+                ))
+            return
 
-def _session_trades(trades, day, contract: str | None):
-    if trades is None or len(trades) == 0:
-        return None
-    frame = trades
-    if contract and "contract" in frame.columns:
-        wanted = str(contract).upper()
-        frame = frame[frame["contract"].astype(str).str.upper() == wanted]
-    if frame.empty:
-        return None
-    mask = frame["timestamp"].dt.date == day
-    day_frame = frame.loc[mask]
-    if day_frame.empty:
-        return None
-    return day_frame.sort_values("timestamp", kind="mergesort")
+        if anchor is not None:
+            stamps = day_trades["timestamp"]
+            in_range = day_trades[(stamps >= range_start) & (stamps < range_end)]
+            if in_range.empty:
+                return
+            range_high = float(in_range["price"].max())
+            range_low = float(in_range["price"].min())
+        else:
+            ranged = ordered[(ordered["timestamp"] >= range_start) & (ordered["timestamp"] < range_end)]
+            if ranged.empty:
+                return
+            range_high = float(ranged["high"].max())
+            range_low = float(ranged["low"].min())
+        if range_high <= 0 or range_low <= 0 or range_high < range_low:
+            warnings.append(f"{day.isoformat()}: faixa de abertura sem preço válido. Sinal pulado.")
+            return
+
+        after = ordered[(ordered["timestamp"] >= range_end) & (ordered["timestamp"] < session_close)]
+        if run["execution"] == "confirm":
+            trade = _first_breakout(
+                after, range_high, range_low, trade_end, bar_delta, run["quantity"], day,
+            )
+        elif anchor is not None:
+            trade = _stop_order_from_trades(
+                day_trades, range_high, range_low, range_end, trade_end, run["quantity"], day,
+            )
+        else:
+            if run["use_ticks"]:
+                run["fallback_days"].append(day.isoformat())
+            trade = _stop_order(
+                after, range_high, range_low, trade_end, bar_delta, run["quantity"], day,
+                instrument.tick_size,
+            )
+        if trade is not None:
+            if (
+                early
+                and exit_bar is not None
+                and pd.Timestamp(trade.exit_time) == pd.Timestamp(trade_end)
+                and float(trade.exit_price) == float(exit_bar["close"])
+            ):
+                warnings.append(early_close_warning(day, exit_bar["timestamp"], session_close))
+            run["raw"].append(trade)
 
 
 def _first_breakout(after: pd.DataFrame, range_high: float, range_low: float, session_close, bar_delta, quantity: int, day):
