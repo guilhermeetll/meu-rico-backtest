@@ -537,6 +537,9 @@ export function App() {
                 <option value="before_cash_auction">Antes do leilão de fechamento do à vista</option>
               </select>
             </label>
+            <p className="hint">
+              Com negócios do tickercsv, o preço de um horário é o último negócio até esse instante. O sinal, a entrada e a saída usam esse preço. Sem os negócios, fica a barra: o open da que começa no horário, ou o close da que termina nele.
+            </p>
             <div className="grid-2">
               <label>
                 Sinal (min)

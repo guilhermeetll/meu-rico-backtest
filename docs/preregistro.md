@@ -21,6 +21,8 @@ Já publicada. A referência, o fim do sinal e a janela da operação formam as 
 
 `prior_close` é o fechamento do pregão anterior do mesmo contrato (Gao, Han, Li e Zhou, 2018). Sem esse fechamento, o sinal daquele pregão é pulado. A Quarta-feira de Cinzas continua fora quando `skip_ash_wednesday` está ligado, que é o padrão desta estratégia.
 
+Com negócios do tickercsv, o preço de um horário é o último negócio até esse instante, inclusive. O fim do sinal, a abertura quando ela é a referência, a entrada e a saída usam esse preço. Às 16:25 a entrada não é o open da barra das 16:25: é o último negócio até 16:25. Às 16:55 a saída não é o close da barra das 16:54: é o último negócio até 16:55. Sem negócio até aquele instante, ou sem o ZIP, fica a aproximação por barra: o open da barra que começa no horário, ou o close da barra que termina nele.
+
 ## Núcleo
 
 Quatro variantes por instrumento. É a grade usada para comparar motores. Num comando com um ativo e uma fonte, N do núcleo = 4. Com vários ativos, uma linha por ativo.
