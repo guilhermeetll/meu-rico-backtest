@@ -16,7 +16,7 @@ docker compose up --build
 
 A interface fica em [http://localhost:8080](http://localhost:8080). A API fica em [http://localhost:8000/api/health](http://localhost:8000/api/health).
 
-Para ver a estratégia de momentum sem o histórico completo, deixe a fonte em **CSV** e a opção **Usar o CSV de exemplo do WINV26**. Esse arquivo está em `backend/sample_data/win_exemplo_1min.csv`, marcado no cabeçalho como exemplo. São barras de 1 minuto agregadas de negócios reais do WINV26 (17 a 30/09/2026), não o ZIP original.
+Para ver a estratégia de momentum sem o histórico completo, deixe a fonte em **CSV** e a opção **Usar as barras reais de setembro/2026**. O arquivo é `backend/sample_data/win_set2026_1min.csv` (cerca de 1,5 MB): barras de 1 minuto de WINV26 e WINZ26, de 01 a 30/09/2026, agregadas dos ZIPs originais com `TipoSessaoPregao=1` e `AcaoAtualizacao=0`. O símbolo `WIN` fica só com a série de `backend/sample_data/win_ativo.csv` em cada pregão. O recorte curto só de WINV26, de 17 a 30/09, continua em `win_exemplo_1min.csv`, marcado como exemplo. Nenhum dos dois substitui o ZIP original.
 
 Testes do motor, sem Docker:
 
@@ -108,27 +108,82 @@ Não há compensação com swing trade, retenção na fonte nem DARF mínimo. Pr
 
 ## Horário do WIN
 
-Abertura 09:00. O fechamento automático:
+Abertura 09:00, exceto na Quarta-feira de Cinzas, quando abre às 13:00. O fechamento automático:
 
-- desde 11/03/2024, 18:25 o ano inteiro (comunicado da B3 de 23/01/2024 e Ofício Circular 013/2024-PRE);
-- antes disso, 17:55 enquanto durava o horário de verão dos EUA (segundo domingo de março até o dia anterior ao primeiro domingo de novembro) e 18:25 fora desse intervalo;
-- no vencimento do contrato específico (quarta-feira mais próxima do dia 15 do mês do código): 18:00 a partir de 04/11/2024 (Ofício Circular 132/2024-PRE) e 17:00 antes disso.
+- desde 11/03/2024, 18:25 o ano inteiro ([Ofício Circular 013/2024-PRE](https://www.b3.com.br/data/files/81/36/04/4D/F333D8103152D4C8AC094EA8/OC%20013-2024%20PRE%20Novos%20horarios%20de%20negociacao%20(PT).pdf));
+- antes disso, 17:55 no horário de verão dos EUA (segundo domingo de março até o dia anterior ao primeiro domingo de novembro) e 18:25 fora desse intervalo. Essa regra anterior é premissa: o ofício que fixa 18:25 o ano inteiro é o 013/2024-PRE, e as trocas de cada ano não têm um PDF neste calendário;
+- no vencimento do contrato específico (quarta-feira mais próxima do dia 15 do mês do código): 18:00 a partir de 04/11/2024 ([Ofício Circular 132/2024-PRE](https://www.b3.com.br/data/files/50/55/44/FF/83D629106EEC8429AC094EA8/OC%20132-2024%20PRE%20%20Novos%20Horarios%20de%20negociacao%20(PT).pdf), mantido pelo [153/2024-PRE](https://www.b3.com.br/data/files/74/76/EA/97/36C239106EEC8429AC094EA8/OC%20153-2024%20PRE%20%20Novos%20Horarios%20de%20Negociacao%20(EN).pdf)) e 17:00 antes disso.
 
-Dá para fixar abertura e fechamento em `HH:MM` no lugar de `auto`. Para ações o padrão é 10:00–17:00, uma aproximação do mercado à vista, também editável. Leilões do pregão regular (sessão 1) permanecem nas barras.
+Na Quarta-feira de Cinzas os ofícios mudam só a abertura dos derivativos (pré-abertura 12:55–13:00, sessão a partir das 13:00). O fechamento do WIN continua o da grade ordinária, inclusive no vencimento.
+
+Dá para fixar abertura e fechamento em `HH:MM` no lugar de `auto`. Isso só move a janela `session_close`. A janela de antes do leilão do à vista ignora esses dois campos e usa o calendário abaixo. Leilões do pregão regular (sessão 1) permanecem nas barras.
+
+## Horário do mercado à vista
+
+A janela `before_cash_auction` é a meia hora contínua que termina quando começa o leilão de fechamento. O leilão são os últimos 5 minutos do pregão regular. O fim do sinal `cash_open` é a abertura do à vista mais `signal_minutes` (30 minutos → 10:30 na grade atual, 13:30 na Quarta-feira de Cinzas, 11:30 quando a abertura era 11:00). Os dois seguem o mesmo calendário, também quando o ativo operado é o WIN.
+
+| Pregões ordinários | Abertura | Contínuo até | Leilão | Janela |
+| --- | --- | --- | --- | --- |
+| Até 09/03/2012 | 11:00 | 17:55 | 17:55–18:00 | 17:25–17:55 |
+| 12/03/2012 a 18/12/2015 | 10:00 | 16:55 | 16:55–17:00 | 16:25–16:55 |
+| 21/12/2015 a 29/09/2023, horário de verão nos EUA e sem horário de verão no Brasil | 10:00 | 16:55 | 16:55–17:00 | 16:25–16:55 |
+| 21/12/2015 a 29/09/2023, nos demais pregões | 10:00 | 17:55 | 17:55–18:00 | 17:25–17:55 |
+| Desde 02/10/2023, o ano inteiro, inclusive novembro–março | 10:00 | 16:55 | 16:55–17:00 | 16:25–16:55 |
+
+Setembro/2026 está na última linha: fechamento às 17:00 e janela 16:25–16:55. Dezembro/2023, janeiro/2024, novembro/2024, janeiro/2025, dezembro/2025 e um pregão comum de fevereiro/2026 também. A regra antiga, que levava a janela para 17:25–17:55 sempre que os EUA estavam fora do horário de verão, não vale nesses dados: 17:25–17:55 é o after-market da grade de verão (cancelamento 17:25–17:30 e negociação 17:30–18:00).
+
+A Quarta-feira de Cinzas não usa essa linha. Desde 2012 o à vista e o WIN abrem às 13:00. Nos ofícios recuperados o à vista negocia das 13:00 às 17:55 e o call vai até as 18:00, então a janela, se o dia não for pulado, é 17:25–17:55. O sinal `cash_open` termina 30 minutos depois da abertura real (13:30). O sinal pela abertura do WIN também mede a partir das 13:00, não das 09:00. O parâmetro `skip_ash_wednesday` pula esses pregões e o padrão é pular.
+
+Ofícios e avisos da grade ordinária:
+
+- [Ofício Circular 125/2021-PRE](https://www.b3.com.br/data/files/D6/02/0D/3C/BF08C710BD0885C7AC094EA8/OC%20125-2021%20PRE%20Novos%20Hor%C3%A1rios%20de%20Negocia%C3%A7%C3%A3o%20(PT).pdf), a partir de 08/11/2021: à vista 10:00–17:55, call 17:55–18:00.
+- [Ofício Circular 020/2022-PRE](https://www.b3.com.br/data/files/40/B4/53/5E/BC4EE710301EBDE7AC094EA8/OC%20020-2022%20PRE%20Novos%20Hor%C3%A1rios%20de%20Negocia%C3%A7%C3%A3o%20(PT).pdf), a partir de 14/03/2022: à vista 10:00–16:55, call 16:55–17:00, after-market 17:30–18:00.
+- [Ofício Circular 125/2022-PRE](https://www.b3.com.br/data/files/43/65/64/03/D1B838101E311E28AC094EA8/OC%20125-2022-PRE%20Novos%20Hor%C3%A1rios%20de%20Negocia%C3%A7%C3%A3o%20(PT).pdf), a partir de 07/11/2022: à vista 10:00–17:55, call 17:55–18:00.
+- [Bora Investir, 03/11/2023](https://borainvestir.b3.com.br/noticias/bolsa-vai-fechar-mais-tarde-a-partir-de-segunda-feira/): a partir de 06/11/2023 o fechamento do à vista vai para as 18:00. O PDF do ofício dessa segunda não foi recuperado.
+- [Ofício Circular 013/2024-PRE](https://www.b3.com.br/data/files/81/36/04/4D/F333D8103152D4C8AC094EA8/OC%20013-2024%20PRE%20Novos%20horarios%20de%20negociacao%20(PT).pdf), a partir de 11/03/2024: à vista 10:00–16:55, call 16:55–17:00, after-market 17:30–18:00. WIN até 18:25 o ano inteiro.
+- [Ofício Circular 132/2024-PRE](https://www.b3.com.br/data/files/50/55/44/FF/83D629106EEC8429AC094EA8/OC%20132-2024%20PRE%20%20Novos%20Horarios%20de%20negociacao%20(PT).pdf), a partir de 04/11/2024, mantido pelo [153/2024-PRE](https://www.b3.com.br/data/files/74/76/EA/97/36C239106EEC8429AC094EA8/OC%20153-2024%20PRE%20%20Novos%20Horarios%20de%20Negociacao%20(EN).pdf): à vista 10:00–17:55, call 17:55–18:00, sem after-market. No vencimento, o WIN encerra às 18:00.
+- [Ofício Circular 014/2025-PRE](https://www.b3.com.br/data/files/63/C3/B3/53/16A1591029BEEC39AC094EA8/OC%20014-2025%20PRE%20Novos%20Horarios%20de%20Negociacao%202025%20vf%20(PT).pdf), a partir de 10/03/2025: à vista 10:00–16:55, call 16:55–17:00, com after-market.
+- [Ofício Circular 043/2025-VNC](https://www.b3.com.br/data/files/36/22/17/A0/0131A910F51990A9AC094EA8/OC%20043-2025-VNC%20NOVOS%20HORARIOS%20DE%20NEGOCIACAO_PT.pdf), a partir de 03/11/2025, no lugar do 040/2025-VNC: à vista 10:00–17:55, call 17:55–18:00, sem after-market.
+- [Ofício Circular 005/2026-PRE](https://www.b3.com.br/data/files/E3/B2/C2/12/BC09C910F37907C9AC094EA8/OC%20005-2026%20PRE%20NOVOS%20HORARIOS%20DE%20NEGOCIACAO_PT.pdf), a partir de 09/03/2026: à vista 10:00–16:55, call 16:55–17:00, cancelamento 17:25–17:30 e after-market 17:30–18:00. É a grade da [página de horário de negociação](https://www.b3.com.br/pt_br/solucoes/plataformas/puma-trading-system/para-participantes-e-traders/horario-de-negociacao/). Não há ofício posterior mudando novembro/2026, então essa grade segue.
+
+Quarta-feira de Cinzas:
+
+- [Ofício Circular 166/2023-PRE](https://www.b3.com.br/data/files/92/94/5A/0A/80E3B810DDBC40B8DC0D8AA8/OC%20166-2023%20PRE%20Calend%C3%A1rio%20de%20Feriados%202024%20e%20Funcionamento%20da%20B3%20em%2014.02.2024%20(Quarta-Feira%20de%20Cinzas)%20(PT).pdf), 14/02/2024: à vista das 13:00 às 17:55, call 17:55–18:00; derivativos a partir das 13:00, com o fechamento ordinário inalterado.
+- [Ofício Circular 149/2024-PRE](https://www.b3.com.br/data/files/58/42/2C/24/0FDF29106EEC8429AC094EA8/OC%20149-2024%20PRE%20Calendario%20de%20Feriados%20em%202025%20e%20Funcionamento%20da%20B3%20em%2005032025%20(Quarta-Feira%20de%20Cinzas)%20(PT).pdf), 05/03/2025, e o [comunicado da B3](https://www.b3.com.br/pt_br/noticias/comunicado-8AA8D0CD94F633D2019528A0851F6085.htm): o mesmo desenho.
+- [Ofício Circular 054/2025-VNC](https://www.b3.com.br/data/files/C2/E3/28/AD/4FAEA9105B12E5A9AC094EA8/OC%20054-2025-VNC%20CALENDARIO%20DE%20FERIADOS%20EM%202026%20E%20FUNCIONAMENTO%20DA%20B3%20EM%2018022026%20QUARTAFEIRA%20DE%20CINZAS_PT.pdf) e a errata [003/2026-VNC](https://www.b3.com.br/data/files/FC/55/3B/12/7FE9B9109B5E99B9AC094EA8/OC%20003-2026-VNC%20ERRATA_CALENDARIO%20DE%20FERIADOS%20EM%202026%20E%20FUNCIONAMENTO%20DA%20B3%20EM%2018022026%20QUARTAFEIRA%20DE%20CINZAS_PT.pdf), 18/02/2026, e o [comunicado de Carnaval](https://www.b3.com.br/pt_br/noticias/confira-o-funcionamento-da-b3-no-carnaval.htm): à vista 13:00–17:55, call 17:55–18:00; derivativos a partir das 13:00.
+
+Checagem nas barras de 60 minutos do Yahoo Finance (`^BVSP` e `PETR4.SA`, vela das 60 minutos, de 27/10/2023 a 30/09/2026, 730 pregões; o relógio da barra é a abertura do candle). Em 726 pregões a última barra é a das 16:00, ou seja, o horário regular termina às 17:00. As exceções com barra das 17:00 são 14/02/2024, 05/03/2025 e 18/02/2026 — as três Quartas-feiras de Cinzas, e na PETR4 essa hora tem volume — e 30/09/2026, cuja barra das 17:00 tem volume zero. Dezembro/2023, janeiro/2024, novembro/2024, janeiro/2025, dezembro/2025 e fevereiro/2026 fora do dia 18 abrem às 10:00 e param na barra das 16:00.
+
+Premissas, repetidas num aviso da API quando o período do backtest cai nelas:
+
+- Até 09/03/2012 o à vista fica em 11:00–18:00. A fonte é o Estado de Minas de 13/10/2011 e a Exame de 12/03/2012, não um ofício recuperado. O fim do horário de verão americano em 07/11/2011 não devolveu o fechamento para as 17:00, e o fim do horário brasileiro em 26/02/2012 também não.
+- De 12/03/2012 a 18/12/2015 o à vista fica em 10:00–17:00 o ano inteiro, inclusive no inverno americano. A CBN de 08/10/2012 registra que o horário de verão de 2012 não voltou para 11:00–18:00. Não apareceu fechamento às 18:00 nesse intervalo. A UOL/Reuters de 21/12/2015 descreve a extensão que começa na segunda seguinte como mudança em relação ao fechamento das 17:00.
+- De 21/12/2015 a 29/09/2023 o fechamento acompanha o horário de verão dos EUA (17:00 dentro, 18:00 fora), com abertura fixa às 10:00. O horário de verão brasileiro, enquanto existiu, não empurra o fechamento para as 19:00. Os ofícios de 2021 e 2022 acima sustentam as pontas; as segundas intermediárias (2016–2020) não têm um PDF por ano neste calendário. O Ofício Circular 005/2020-VOP trata de flexibilização e circuit breaker, não de um pregão encerrado às 13:00.
+- De 06/11/2023 a 08/03/2024, de 04/11/2024 a 07/03/2025 e de 03/11/2025 a 06/03/2026 os ofícios publicam call até as 18:00. A janela da estratégia não usa essa extensão: a última barra regular continua sendo a das 16:00, e 17:25–17:55 cairia no after-market da grade que as barras mostram. Fora desses três intervalos, o fechamento às 17:00 é o do próprio ofício (013/2024-PRE, 014/2025-PRE e 005/2026-PRE).
+- Na Quarta-feira de Cinzas de 2012 a 2023 a abertura às 13:00 e o call 17:55–18:00 repetem o desenho dos ofícios de 2024, 2025 e 2026. O PDF de cada um desses anos anteriores não foi recuperado.
+- Antes de 11/03/2024 o fechamento do WIN em 17:55/18:25 conforme o relógio americano é premissa, como dito acima.
+- Feriados não mudam o relógio; simplesmente não há barra. Véspera de Natal e 31/12 não têm grade própria.
+
+Para uma ação, `session_bounds` devolve a abertura e o fim do leilão. Num pregão ordinário desde outubro/2023 isso é 10:00–17:00. Na Quarta-feira de Cinzas, 13:00–18:00.
 
 ## Estratégia de momentum
 
 Há duas referências de sinal, as duas na API (`signal_anchor`) e na tela:
 
-- `session_open` (padrão): preço no fim da primeira janela (30 minutos) dividido pela abertura do pregão, menos um. É o movimento só da manhã.
-- `prior_close`: o mesmo preço no fim da primeira janela dividido pelo fechamento anterior **do mesmo contrato**, menos um. Inclui o gap noturno, como em Gao, Han, Li e Zhou (2018), *Market intraday momentum*. Usa `return_versus_prior_close`. Se esse fechamento não está na série, o sinal daquele pregão é pulado — não se empresta o fechamento de outro vencimento.
+- `session_open` (padrão): preço no fim do sinal dividido pela abertura do pregão, menos um.
+- `prior_close`: o mesmo preço dividido pelo fechamento anterior **do mesmo contrato**, menos um. Inclui o gap noturno, como em Gao, Han, Li e Zhou (2018), *Market intraday momentum*. Usa `return_versus_prior_close`. Se esse fechamento não está na série, o sinal daquele pregão é pulado — não se empresta o fechamento de outro vencimento.
+
+O instante desse preço também é uma opção (`signal_end`), na API e na tela, e funciona com as duas referências:
+
+- `session_open` (padrão): `signal_minutes` depois da abertura do ativo. No WIN de hoje, 30 minutos terminam às 09:30, antes de as ações abrirem.
+- `cash_open`: `signal_minutes` depois da abertura do à vista. É o corte do artigo, meia hora após a abertura do mercado de ações. Hoje isso é 10:30; na Quarta-feira de Cinzas, 13:30; em 2012, enquanto a abertura era 11:00, era 11:30.
 
 Compra se passar do limiar, vende se ficar abaixo do limiar negativo, e fica de fora no meio.
 
 A janela da operação também tem duas opções (`trade_window`):
 
 - `session_close` (padrão): entra nos últimos `trade_minutes` (30) e zera no fechamento do pregão. No WIN automático isso é 17:55–18:25. Abertura, fechamento e duração continuam editáveis (`HH:MM` ou `auto`).
-- `before_cash_auction`: entra às 16:25 e zera às 16:55, antes do leilão de fechamento do mercado à vista. Os horários da outra opção continuam configuráveis; esta é a alternativa pronta para não operar depois que o à vista já fechou.
+- `before_cash_auction`: a meia hora contínua anterior ao leilão do à vista, no calendário da seção acima. Em setembro/2026, e nos invernos de 2023 a 2026, é 16:25–16:55. Na Quarta-feira de Cinzas, se o dia não for pulado, é 17:25–17:55. O parâmetro `skip_ash_wednesday` (padrão ligado) descarta essas quartas.
 
 Não há posição overnight. Um timeframe mais grosso que a janela do sinal não olha o miolo de uma barra ainda aberta: o pregão é pulado.
 
@@ -153,7 +208,7 @@ O walk-forward percorre janelas de treino e teste. Sem grade, os mesmos parâmet
 
 **Yahoo Finance.** Ações, com sufixo `.SA` se você não informar (`PETR4` vira `PETR4.SA`). 5 minutos até cerca de 60 dias corridos; 60 minutos até cerca de 730. O relógio da barra é o de abertura do candle.
 
-**CSV de barras.** Colunas `datetime` (ou `data` e `hora`), `open`/`abertura`, `high`/`máxima`, `low`/`mínima`, `close`/`fechamento` e `volume`/`quantidade`. Separador vírgula ou ponto e vírgula. Decimal com ponto ou vírgula. Horário sem fuso é `America/Sao_Paulo`. O mapeamento pode ser `{"Abertura": "open"}` ou `{"open": "Abertura"}`. Linhas que começam com `#` são comentário.
+**CSV de barras.** Colunas `datetime` ou `ts` (ou `data` e `hora`), `open`/`abertura`, `high`/`máxima`, `low`/`mínima`, `close`/`fechamento`, `volume`/`quantidade` e, se houver mais de um contrato, `ticker`. Separador vírgula ou ponto e vírgula. Decimal com ponto ou vírgula. Horário sem fuso é `America/Sao_Paulo`. O mapeamento pode ser `{"Abertura": "open"}` ou `{"open": "Abertura"}`. Linhas que começam com `#` são comentário. Com o símbolo `WIN` e vários vencimentos no arquivo, o loader usa o `win_ativo.csv` da mesma pasta e deixa um vencimento por pregão. Um ticker explícito, como `WINV26`, fica só com aquela série. Sem o `win_ativo.csv`, o pregão misto é pulado pela estratégia.
 
 ## Como acrescentar uma estratégia
 

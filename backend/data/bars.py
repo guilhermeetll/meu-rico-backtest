@@ -35,7 +35,8 @@ def normalize_bars(frame: pd.DataFrame) -> pd.DataFrame:
     out["volume"] = pd.to_numeric(out["volume"], errors="coerce").fillna(0.0)
     out = out.dropna(subset=["timestamp", "open", "high", "low", "close"])
     out = out.sort_values("timestamp")
-    out = out.drop_duplicates("timestamp", keep="last")
+    identity = ["timestamp", "contract"] if "contract" in out.columns else ["timestamp"]
+    out = out.drop_duplicates(identity, keep="last")
     columns = ["timestamp", "open", "high", "low", "close", "volume"]
     if "contract" in out.columns:
         columns.append("contract")

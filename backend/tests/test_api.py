@@ -65,6 +65,7 @@ def test_backtest_round_trip_and_history(tmp_path: Path, monkeypatch):
         assert body["trades"][0]["direction"] == "long"
         assert body["trades"][1]["direction"] == "short"
         assert "líquido de IR" in body["summary"]
+        assert not any("Premissa" in warning for warning in body["warnings"])
         listed = client.get("/api/backtests")
         assert listed.status_code == 200
         assert listed.json()[0]["id"] == body["id"]

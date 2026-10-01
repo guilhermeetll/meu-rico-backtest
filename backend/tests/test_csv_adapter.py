@@ -46,6 +46,56 @@ def test_csv_english_header(tmp_path: Path):
     assert result.bars.iloc[0]["close"] == pytest.approx(10.5)
 
 
+def test_csv_accepts_ts_and_keeps_the_active_win_series(tmp_path: Path):
+    bars_path = tmp_path / "win_set.csv"
+    bars_path.write_text(
+        "# comentario\n"
+        "ticker,ts,open,high,low,close,volume\n"
+        "WINV26,2026-09-01 09:00:00,10,10,10,10,1\n"
+        "WINZ26,2026-09-01 09:00:00,99,99,99,99,1\n"
+        "WINV26,2026-09-02 09:00:00,11,11,11,11,1\n"
+        "WINZ26,2026-09-02 09:00:00,98,98,98,98,1\n"
+        "WINV26,2026-09-07 09:00:00,12,12,12,12,1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "win_ativo.csv").write_text(
+        "date,serie_ativa,trades\n"
+        "2026-09-01,WINV26,10\n"
+        "2026-09-02,WINZ26,10\n"
+        "2026-09-07,WINV26,0\n",
+        encoding="utf-8",
+    )
+    result = CsvBarsAdapter().load(
+        DataRequest(symbol="WIN", start=date(2026, 9, 1), end=date(2026, 9, 30), timeframe="1min", csv_path=bars_path)
+    )
+    assert list(result.bars["contract"]) == ["WINV26", "WINZ26"]
+    assert list(result.bars["close"]) == [10, 98]
+    explicit = CsvBarsAdapter().load(
+        DataRequest(symbol="WINZ26", start=date(2026, 9, 1), end=date(2026, 9, 2), timeframe="1min", csv_path=bars_path)
+    )
+    assert set(explicit.bars["contract"]) == {"WINZ26"}
+
+
+def test_september_2026_file_becomes_continuous_win():
+    root = Path(__file__).resolve().parents[1] / "sample_data"
+    result = CsvBarsAdapter().load(
+        DataRequest(
+            symbol="WIN",
+            start=date(2026, 9, 1),
+            end=date(2026, 9, 30),
+            timeframe="1min",
+            csv_path=root / "win_set2026_1min.csv",
+        )
+    )
+    days = set(result.bars["timestamp"].dt.date)
+    assert set(result.bars["contract"]) == {"WINV26"}
+    assert date(2026, 9, 1) in days
+    assert date(2026, 9, 30) in days
+    assert date(2026, 9, 7) not in days
+    assert len(days) == 21
+    assert not result.warnings
+
+
 def test_yahoo_rejects_win_and_ranges_that_are_too_long():
     adapter = YahooFinanceAdapter()
     with pytest.raises(ValueError, match="WIN"):
