@@ -43,5 +43,6 @@ class Strategy(ABC):
         params: dict,
         instrument: InstrumentSpec,
         bar_minutes: int,
+        trades=None,
     ) -> tuple[list[RawTrade], list[str], list[SkippedSession]]:
         raise NotImplementedError

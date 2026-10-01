@@ -9,6 +9,7 @@ from engine.costs import CostModel
 from engine.instruments import WIN
 from engine.sessions import cash_auction_window
 from engine.strategies.momentum import IntradayMomentumStrategy
+from engine.study import run_study
 from engine.walkforward import WalkForwardConfig
 
 TZ = ZoneInfo("America/Sao_Paulo")
@@ -569,3 +570,93 @@ def test_each_incomplete_window_is_its_own_skipped_record():
     assert "Janela da operação" in trade.reason and "12:00" in trade.reason
     assert "Janela da operação" not in signal.reason
     assert "Janela do sinal" not in trade.reason
+
+
+def _print(day: date, hour: int, minute: int, second: int, price: float) -> dict:
+    return {
+        "timestamp": pd.Timestamp(datetime(day.year, day.month, day.day, hour, minute, second, tzinfo=TZ)),
+        "price": price,
+    }
+
+
+def test_tickercsv_prices_each_clock_at_the_last_print():
+    """16:25 and 16:55, and the signal, are the last print up to that instant."""
+    day = date(2026, 9, 17)
+    rows = [
+        {"timestamp": _stamp(day, 9, 0), "open": 100_020, "high": 100_020, "low": 100_020, "close": 100_020, "volume": 1},
+        {"timestamp": _stamp(day, 9, 29), "open": 100_040, "high": 100_050, "low": 100_040, "close": 100_050, "volume": 1},
+        {"timestamp": _stamp(day, 16, 25), "open": 100_200, "high": 100_200, "low": 100_200, "close": 100_200, "volume": 1},
+        {"timestamp": _stamp(day, 16, 54), "open": 100_240, "high": 100_250, "low": 100_240, "close": 100_250, "volume": 1},
+    ]
+    prints = pd.DataFrame([
+        _print(day, 9, 0, 0, 100_020),
+        _print(day, 9, 0, 0, 100_000),
+        _print(day, 9, 29, 40, 100_050),
+        _print(day, 9, 30, 0, 99_900),
+        _print(day, 16, 24, 50, 100_100),
+        _print(day, 16, 25, 20, 100_200),
+        _print(day, 16, 54, 40, 100_250),
+        _print(day, 16, 55, 0, 100_180),
+        _print(day, 16, 55, 1, 100_000),
+    ])
+    bars_only, bar_notes, _ = IntradayMomentumStrategy().generate(
+        _frame(rows),
+        {"trade_window": "before_cash_auction", "min_bar_coverage": 0},
+        WIN,
+        1,
+    )
+    from_ticks, tick_notes, skipped = IntradayMomentumStrategy().generate(
+        _frame(rows),
+        {"trade_window": "before_cash_auction", "min_bar_coverage": 0},
+        WIN,
+        1,
+        trades=prints,
+    )
+    assert skipped == []
+    assert bars_only[0].direction == 1
+    assert bars_only[0].signal_return == pytest.approx(100_050 / 100_020 - 1)
+    assert bars_only[0].entry_price == 100_200
+    assert bars_only[0].exit_price == 100_250
+    assert from_ticks[0].direction == -1
+    assert from_ticks[0].signal_return == pytest.approx(99_900 / 100_000 - 1)
+    assert from_ticks[0].entry_time.hour == 16 and from_ticks[0].entry_time.minute == 25
+    assert from_ticks[0].entry_price == 100_100
+    assert from_ticks[0].exit_time.hour == 16 and from_ticks[0].exit_time.minute == 55
+    assert from_ticks[0].exit_price == 100_180
+    assert any("aproximação por barra" in note for note in bar_notes)
+    assert any("tickercsv" in note for note in tick_notes)
+
+
+def test_momentum_variants_share_one_read_of_each_session():
+    day = date(2026, 9, 17)
+    rows = _day_bars(day, 100_000, 100_050, 100_100, 100_150)
+
+    class Counting:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, session, contract):
+            self.calls.append(session)
+            return None
+
+    source = Counting()
+    variants = [
+        {"signal_anchor": "session_open", "trade_window": "session_close", "min_bar_coverage": 0},
+        {"signal_anchor": "session_open", "trade_window": "before_cash_auction", "min_bar_coverage": 0},
+    ]
+    trials, results = run_study(
+        _frame(rows),
+        IntradayMomentumStrategy(),
+        variants,
+        WIN,
+        CostModel(0.50, 1),
+        symbol="WIN",
+        initial_capital=10_000,
+        tax_rate=0.0,
+        n_trials=1,
+        bar_minutes=1,
+        trades=source,
+    )
+    assert trials == 2
+    assert len(results) == 2
+    assert source.calls == [day]

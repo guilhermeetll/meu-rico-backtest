@@ -185,11 +185,36 @@ A janela da operação também tem duas opções (`trade_window`):
 - `session_close` (padrão): entra nos últimos `trade_minutes` (30) e zera no fechamento do pregão. No WIN automático isso é 17:55–18:25. Abertura, fechamento e duração continuam editáveis (`HH:MM` ou `auto`).
 - `before_cash_auction`: a meia hora contínua anterior ao leilão do à vista, no calendário da seção acima. Em setembro/2026, e nos invernos de 2023 a 2026, é 16:25–16:55. Na Quarta-feira de Cinzas, se o dia não for pulado, é 17:25–17:55. O parâmetro `skip_ash_wednesday` (padrão ligado) descarta essas quartas.
 
+Com negócios do tickercsv, o preço de um horário é o último negócio até esse instante. O sinal, a entrada e a saída usam esse preço. Às 16:25 entra no último negócio até 16:25, não no open da barra. Às 16:55 sai no último negócio até 16:55, não no close da barra das 16:54. Sem o ZIP, fica a aproximação por barra.
+
 Não há posição overnight. Um timeframe mais grosso que a janela não olha o miolo de uma barra ainda aberta: o pregão é pulado.
 
 Barra faltando também pula o pregão, em vez de calcular o sinal com o que sobrou. Cada janela — a do sinal e a da operação — precisa da barra de início, da barra que fecha exatamente no fim da janela e de uma cobertura mínima. A barra de início pode atrasar `edge_tolerance_minutes` (padrão 5): o primeiro negócio do WIN costuma sair às 09:02 ou 09:03, e esses minutos iniciais contam como cobertos. Uma primeira barra às 11:00, 12:00, 13:00 ou 15:00 fica fora dessa tolerância. A cobertura padrão é 90% (`min_bar_coverage`); zero desliga só a fração e mantém as duas pontas. O motivo entra em `skipped` na resposta da API e na lista «Dias pulados» da tela, com o campo `window`: `signal` para a janela do sinal e `trade` para a janela da operação. Os avisos desses pregões não são cortados no limite de 30.
 
 Pular o dia porque a janela da operação está incompleta só acontece no backtest. Ao vivo o sinal da manhã já teria aberto a posição; se o pregão para no meio da tarde, por exemplo num circuit breaker, essa operação de estresse continua aberta. No backtest o dia some e o resultado fica mais limpo do que teria sido ao vivo. Quando há pregões assim, o resumo conta quantos foram pulados por janela de operação incompleta.
+
+## Reversão do gap e rompimento da faixa
+
+As duas grades seguintes estão pré-registradas em `docs/preregistro.md`, junto com as oito do momentum. O arquivo fixa as regras antes do resultado; a tela e a API só escolhem o que está nessa grade.
+
+A reversão do gap de abertura (Ceretta e Da Costa, 2017, *Economics Bulletin* 37(4)) usa gap = abertura / fechamento anterior − 1. A abertura é o primeiro negócio da sessão regular, até 30 minutos depois do horário do calendário (`open_tolerance_minutes`). No WIN o fechamento anterior é o do mesmo vencimento. Gap no limiar ou além vende; no limiar negativo ou além, compra. Os limiares são 0,5%, 1% e 1,5%, os mesmos para WIN e ações. Com negócios do tickercsv, t0 é o timestamp exato desse primeiro negócio: a entrada é o último negócio até t0 + 1 minuto, e a saída de 15 ou 30 minutos é o último negócio até o horário da entrada mais esse prazo. Sem esses negócios, a entrada é o open da primeira barra que começa pelo menos 1 minuto depois do primeiro negócio, e nunca a própria barra de abertura. Se o leilão imprime às 10:03, a entrada é às 10:04 ou na primeira barra seguinte. No WIN, o primeiro negócio das 09:02 não é a entrada: a entrada é a barra das 09:03 ou a primeira depois dela.
+
+O núcleo sai 15 minutos depois da entrada, no open da barra que começa nesse instante. Os extras saem em 30 minutos ou no fim do dia. Fim do dia, nas ações e no WIN, é o fim do contínuo antes do leilão do à vista: 16:55 no pregão ordinário vigente. Se a barra que fecha nesse instante não existe, a posição aberta sai no último negócio regular dentro de 15 minutos antes do call (`close_tolerance_minutes`), com aviso, e o dia não é pulado.
+
+O rompimento da faixa de abertura é o controle. A faixa vai de t0 até t0 mais N minutos. Com o ZIP do tickercsv, t0 é o timestamp exato do primeiro negócio e o rompimento só vale depois, num negócio em t0 + N ou mais tarde. Sem o ZIP, t0 é o minuto da primeira barra. A cobertura das barras continua medida nesse minuto. O núcleo é uma ordem stop na faixa de 5 minutos: a compra só dispara acima da máxima e a venda só abaixo da mínima. Encostar na borda não entra. O stop é o outro extremo e dispara ao encostar. Nas barras OHLC, o preço cru da compra é o maior entre a abertura e a borda mais 1 tick, e o slippage soma outro tick. A venda é o espelho. Com o ZIP, a entrada é o primeiro negócio estritamente fora da faixa, mais 1 tick de slippage. Corretagem e emolumentos não mudam. A variante `orb_confirm` guarda a regra anterior, o fechamento fora da faixa com entrada na barra seguinte, nas faixas de 5, 15 e 30 minutos. Os extras são o stop de 15 e 30 minutos mais as três de `orb_confirm`. Sem alvo: a saída forçada é a mesma do fim do dia do gap. No máximo uma operação por dia. O estudo lê cada pregão do tickercsv uma vez e reparte esse pregão entre as variantes.
+
+As duas rodam no WIN e em ações, com B3, Yahoo ou CSV. Na tela, o seletor de estratégia troca os campos e o botão da grade. O id na API é `gap_reversal` ou `opening_range_breakout`.
+
+O comando abaixo grava CSV e Markdown. O relatório lista o núcleo e depois os extras, e diz se o gap e o ORB usaram a aproximação por barra ou o negócio do tickercsv. Por instrumento, o núcleo tem 4 linhas e os extras 11. N do Sharpe deflacionado é a soma das duas, vezes ativos e fontes, ou `--n-trials` se for maior (o catálogo do projeto soma 23). Um valor menor não reduz N. Cada linha traz o t-stat por trade e o t-stat da média diária dos trades.
+
+```bash
+cd backend
+python -m app.study --start 2026-09-01 --end 2026-09-30 --symbols WIN \
+  --sources csv --strategies gap_reversal,opening_range_breakout --timeframe 1min \
+  --out /tmp/estudo-win
+```
+
+Sem `--timeframe`, CSV e B3 ficam em 1 minuto e o Yahoo em 5 minutos. O Yahoo de 5 minutos não passa de 59 dias corridos.
 
 ## Métricas
 
@@ -210,13 +235,13 @@ O walk-forward percorre janelas de treino e teste. Sem grade, os mesmos parâmet
 
 ## Outras fontes
 
-**Yahoo Finance.** Ações, com sufixo `.SA` se você não informar (`PETR4` vira `PETR4.SA`). 5 minutos até cerca de 60 dias corridos; 60 minutos até cerca de 730. O relógio da barra é o de abertura do candle.
+**Yahoo Finance.** Ações, com sufixo `.SA` se você não informar (`PETR4` vira `PETR4.SA`). 5 minutos até cerca de 60 dias corridos; 60 minutos até cerca de 730. O relógio da barra é o de abertura do candle. Se o yfinance voltar vazio, a mesma série pública é lida no endpoint de gráfico.
 
 **CSV de barras.** Colunas `datetime` ou `ts` (ou `data` e `hora`), `open`/`abertura`, `high`/`máxima`, `low`/`mínima`, `close`/`fechamento`, `volume`/`quantidade` e, se houver mais de um contrato, `ticker`. Separador vírgula ou ponto e vírgula. Decimal com ponto ou vírgula. Horário sem fuso é `America/Sao_Paulo`. O mapeamento pode ser `{"Abertura": "open"}` ou `{"open": "Abertura"}`. Linhas que começam com `#` são comentário. Com o símbolo `WIN` e vários vencimentos no arquivo, o loader usa o `win_ativo.csv` da mesma pasta e deixa um vencimento por pregão. Um ticker explícito, como `WINV26`, fica só com aquela série. Sem o `win_ativo.csv`, o pregão misto é pulado pela estratégia.
 
 ## Como acrescentar uma estratégia
 
-Crie uma classe em `backend/engine/strategies/` herdando de `Strategy`, com `id`, `label`, `description`, `param_schema` e `generate`. `generate` devolve operações cruas (preço de mercado, sem custo) e avisos. O motor aplica custo, slippage, IR e métricas. Registre a classe em `STRATEGIES`, em `backend/engine/strategies/registry.py`. Se o sinal usar fechamento anterior, chame `return_versus_prior_close` ou `contract_prior_close` e pule o pregão quando o retorno vier vazio. Não misture dois vencimentos no mesmo dia: `contracts_of` com mais de um contrato deve descartar o sinal.
+Crie uma classe em `backend/engine/strategies/` herdando de `Strategy`, com `id`, `label`, `description`, `param_schema` e `generate`. `generate` devolve operações cruas (preço de mercado, sem custo), avisos e a lista de pregões pulados, cada um com `window` `signal` ou `trade`. O motor aplica custo, slippage, IR e métricas. Registre a classe em `STRATEGIES`, em `backend/engine/strategies/registry.py`. Se o sinal usar fechamento anterior, chame `previous_close` (ou `return_versus_prior_close` / `contract_prior_close`) e pule o pregão quando o retorno vier vazio. Não misture dois vencimentos no mesmo dia: `contracts_of` com mais de um contrato deve descartar o sinal. Uma grade nova entra em `docs/preregistro.md` antes de olhar o resultado.
 
 ## Como acrescentar uma fonte de dados
 

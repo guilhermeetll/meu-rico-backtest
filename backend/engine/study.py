@@ -6,7 +6,8 @@ study, so the best one is not reported as if it had been the only trial.
 
 from __future__ import annotations
 
-from engine.backtest import SampleSplit, run_backtest
+from engine.backtest import SampleSplit, finish_backtest, run_backtest
+from engine.trades import as_lookup
 from engine.costs import CostModel
 from engine.instruments import InstrumentSpec
 from engine.models import BacktestResult
@@ -41,9 +42,38 @@ def run_study(
     bar_minutes: int,
     sample_split: SampleSplit | None = None,
     walk_forward: WalkForwardConfig | None = None,
+    trades=None,
 ) -> tuple[int, list[tuple[dict, BacktestResult]]]:
     trials = trial_count(n_trials, len(variants))
-    results: list[tuple[dict, BacktestResult]] = []
+    if hasattr(strategy, "generate_many"):
+        bundles = strategy.generate_many(bars, variants, instrument, bar_minutes, as_lookup(trades))
+        results: list[tuple[dict, BacktestResult]] = []
+        for params, (raw, warnings, skipped) in zip(variants, bundles):
+            results.append(
+                (
+                    params,
+                    finish_backtest(
+                        bars,
+                        raw,
+                        warnings,
+                        skipped,
+                        strategy,
+                        params,
+                        instrument,
+                        costs,
+                        symbol=symbol,
+                        initial_capital=initial_capital,
+                        tax_rate=tax_rate,
+                        n_trials=trials,
+                        bar_minutes=bar_minutes,
+                        sample_split=sample_split,
+                        walk_forward=walk_forward,
+                        trade_source=trades,
+                    ),
+                )
+            )
+        return trials, results
+    results = []
     for params in variants:
         results.append(
             (
@@ -61,6 +91,7 @@ def run_study(
                     bar_minutes=bar_minutes,
                     sample_split=sample_split,
                     walk_forward=walk_forward,
+                    trades=trades,
                 ),
             )
         )

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from datetime import timedelta
+import json
+from datetime import datetime, time, timedelta
+from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -50,26 +53,77 @@ class YahooFinanceAdapter:
 
 
 def _download(ticker: str, request: DataRequest) -> pd.DataFrame:
-    import yfinance as yf
-
-    end = request.end + timedelta(days=1)
-    frame = yf.download(
-        ticker,
-        start=request.start.isoformat(),
-        end=end.isoformat(),
-        interval=YAHOO_INTERVAL[request.timeframe],
-        progress=False,
-        auto_adjust=False,
-        threads=False,
-    )
+    frame = _download_yfinance(ticker, request)
+    if frame is None or frame.empty:
+        # yfinance often comes back empty when the crumb endpoint fails.
+        # The chart endpoint is the same public series, with the bar open as the clock.
+        frame = _download_chart(ticker, request)
     return frame
+
+
+def _download_yfinance(ticker: str, request: DataRequest) -> pd.DataFrame | None:
+    try:
+        import yfinance as yf
+
+        end = request.end + timedelta(days=1)
+        return yf.download(
+            ticker,
+            start=request.start.isoformat(),
+            end=end.isoformat(),
+            interval=YAHOO_INTERVAL[request.timeframe],
+            progress=False,
+            auto_adjust=False,
+            threads=False,
+        )
+    except Exception:
+        return None
+
+
+def _download_chart(ticker: str, request: DataRequest) -> pd.DataFrame:
+    tz = ZoneInfo("America/Sao_Paulo")
+    period1 = int(datetime.combine(request.start, time.min, tzinfo=tz).timestamp())
+    period2 = int(datetime.combine(request.end + timedelta(days=1), time.min, tzinfo=tz).timestamp())
+    url = (
+        "https://query1.finance.yahoo.com/v8/finance/chart/"
+        f"{ticker}?interval={YAHOO_INTERVAL[request.timeframe]}"
+        f"&period1={period1}&period2={period2}&includePrePost=false"
+    )
+    fetched = urlopen(Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=30)
+    payload = json.load(fetched)
+    result = (payload.get("chart") or {}).get("result") or []
+    if not result:
+        return pd.DataFrame()
+    block = result[0]
+    stamps = block.get("timestamp") or []
+    quote = ((block.get("indicators") or {}).get("quote") or [{}])[0]
+    rows = []
+    for index, stamp in enumerate(stamps):
+        rows.append(
+            {
+                "timestamp": datetime.fromtimestamp(int(stamp), tz),
+                "open": _at(quote.get("open"), index),
+                "high": _at(quote.get("high"), index),
+                "low": _at(quote.get("low"), index),
+                "close": _at(quote.get("close"), index),
+                "volume": _at(quote.get("volume"), index) or 0,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _at(values, index: int):
+    if not values or index >= len(values):
+        return None
+    return values[index]
 
 
 def _to_bars(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
     if isinstance(out.columns, pd.MultiIndex):
         out.columns = out.columns.get_level_values(0)
-    out = out.reset_index()
+    names = {str(column).lower().replace(" ", "") for column in out.columns}
+    if not names & {"timestamp", "datetime", "date", "index"}:
+        out = out.reset_index()
     renamed = {}
     for column in out.columns:
         key = str(column).lower().replace(" ", "")
