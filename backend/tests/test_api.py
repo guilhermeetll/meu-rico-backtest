@@ -65,6 +65,7 @@ def test_backtest_round_trip_and_history(tmp_path: Path, monkeypatch):
         assert body["trades"][0]["direction"] == "long"
         assert body["trades"][1]["direction"] == "short"
         assert "líquido de IR" in body["summary"]
+        assert body["skipped"] == []
         assert not any("Premissa" in warning for warning in body["warnings"])
         listed = client.get("/api/backtests")
         assert listed.status_code == 200
@@ -100,6 +101,7 @@ def test_study_counts_variants_as_deflated_sharpe_trials(tmp_path: Path, monkeyp
         assert body["n_variants"] == 2
         assert body["n_trials"] == 2
         assert all(item["metrics"]["n_trials"] == 2 for item in body["variants"])
+        assert all(item["skipped"] == [] for item in body["variants"])
         assert "N=2" in body["variants"][0]["notes"][2] or any("N=2" in note for note in body["variants"][0]["notes"])
         instruments = client.get("/api/instruments").json()
         equity = next(item for item in instruments if item["symbol"] == "ACAO")

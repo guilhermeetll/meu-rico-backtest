@@ -234,6 +234,10 @@ def _serialize(payload: BacktestInput, instrument, costs: CostModel, result: Bac
         "equity": [_point(point) for point in result.equity],
         "trades": [_trade(trade) for trade in result.trades],
         "warnings": _unique(warnings),
+        "skipped": [
+            {"date": item.session_date.isoformat(), "reason": item.reason}
+            for item in result.skipped
+        ],
         "notes": notes,
         "assumptions": {
             "point_value": instrument.point_value,

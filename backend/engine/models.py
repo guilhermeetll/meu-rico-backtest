@@ -94,6 +94,12 @@ class WalkForwardResult:
     n_configurations: int
 
 
+@dataclass(frozen=True)
+class SkippedSession:
+    session_date: date
+    reason: str
+
+
 @dataclass
 class BacktestResult:
     trades: list[Trade]
@@ -104,3 +110,4 @@ class BacktestResult:
     walk_forward: WalkForwardResult | None
     warnings: list[str] = field(default_factory=list)
     session_dates: list[date] = field(default_factory=list)
+    skipped: list[SkippedSession] = field(default_factory=list)

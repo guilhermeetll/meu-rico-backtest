@@ -79,6 +79,7 @@ export type BacktestResult = {
   equity: EquityPoint[];
   trades: TradeRow[];
   warnings: string[];
+  skipped?: Array<{ date: string; reason: string }>;
   notes: string[];
   request: {
     strategy_params: Record<string, unknown>;

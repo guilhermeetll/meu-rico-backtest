@@ -133,7 +133,7 @@ th { color: var(--muted); font-weight: 500; }
 
 .notes { color: var(--muted); font-size: 13px; }
 .notes li, .warn li { margin: 6px 0; }
-.warn { color: #f0d7a4; font-size: 13px; }
+.warn { color: #f0d7a4; font-size: 13px; overflow-wrap: anywhere; }
 
 .history { margin-top: 18px; }
 .history-list { display: grid; gap: 8px; }
@@ -152,5 +152,6 @@ th { color: var(--muted); font-weight: 500; }
 
 @media (max-width: 980px) {
   header { flex-direction: column; align-items: flex-start; }
-  .layout, .cards, .grid-2 { grid-template-columns: 1fr; }
+  .layout, .cards, .grid-2 { grid-template-columns: minmax(0, 1fr); }
+  .panel, .scroll { min-width: 0; }
 }

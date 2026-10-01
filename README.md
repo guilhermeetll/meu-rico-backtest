@@ -185,7 +185,9 @@ A janela da operação também tem duas opções (`trade_window`):
 - `session_close` (padrão): entra nos últimos `trade_minutes` (30) e zera no fechamento do pregão. No WIN automático isso é 17:55–18:25. Abertura, fechamento e duração continuam editáveis (`HH:MM` ou `auto`).
 - `before_cash_auction`: a meia hora contínua anterior ao leilão do à vista, no calendário da seção acima. Em setembro/2026, e nos invernos de 2023 a 2026, é 16:25–16:55. Na Quarta-feira de Cinzas, se o dia não for pulado, é 17:25–17:55. O parâmetro `skip_ash_wednesday` (padrão ligado) descarta essas quartas.
 
-Não há posição overnight. Um timeframe mais grosso que a janela do sinal não olha o miolo de uma barra ainda aberta: o pregão é pulado.
+Não há posição overnight. Um timeframe mais grosso que a janela não olha o miolo de uma barra ainda aberta: o pregão é pulado.
+
+Barra faltando também pula o pregão, em vez de calcular o sinal com o que sobrou. Cada janela — a do sinal e a da operação — precisa da barra de início, da barra que fecha exatamente no fim da janela e de uma cobertura mínima. A barra de início pode atrasar `edge_tolerance_minutes` (padrão 5): o primeiro negócio do WIN costuma sair às 09:02 ou 09:03, e esses minutos iniciais contam como cobertos. Uma primeira barra às 11:00, 12:00, 13:00 ou 15:00 fica fora dessa tolerância. A cobertura padrão é 90% (`min_bar_coverage`); zero desliga só a fração e mantém as duas pontas. O motivo entra em `skipped` na resposta da API e na lista «Dias pulados» da tela. Os avisos desses pregões não são cortados no limite de 30.
 
 ## Métricas
 
