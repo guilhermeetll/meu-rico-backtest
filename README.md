@@ -16,7 +16,7 @@ docker compose up --build
 
 A interface fica em [http://localhost:8080](http://localhost:8080). A API fica em [http://localhost:8000/api/health](http://localhost:8000/api/health).
 
-Para ver a estratégia de momentum sem o histórico completo, deixe a fonte em **CSV** e a opção **Usar o CSV de exemplo do WINV26**. Esse arquivo está em `backend/sample_data/win_exemplo_1min.csv`, marcado no cabeçalho como exemplo. São barras de 1 minuto agregadas de negócios reais do WINV26 (17 a 30/09/2026), não o ZIP original.
+Para ver a estratégia de momentum sem o histórico completo, deixe a fonte em **CSV** e a opção **Usar as barras reais de setembro/2026**. O arquivo é `backend/sample_data/win_set2026_1min.csv` (cerca de 1,5 MB): barras de 1 minuto de WINV26 e WINZ26, de 01 a 30/09/2026, agregadas dos ZIPs originais com `TipoSessaoPregao=1` e `AcaoAtualizacao=0`. O símbolo `WIN` fica só com a série de `backend/sample_data/win_ativo.csv` em cada pregão. O recorte curto só de WINV26, de 17 a 30/09, continua em `win_exemplo_1min.csv`, marcado como exemplo. Nenhum dos dois substitui o ZIP original.
 
 Testes do motor, sem Docker:
 
@@ -114,21 +114,64 @@ Abertura 09:00. O fechamento automático:
 - antes disso, 17:55 enquanto durava o horário de verão dos EUA (segundo domingo de março até o dia anterior ao primeiro domingo de novembro) e 18:25 fora desse intervalo;
 - no vencimento do contrato específico (quarta-feira mais próxima do dia 15 do mês do código): 18:00 a partir de 04/11/2024 (Ofício Circular 132/2024-PRE) e 17:00 antes disso.
 
-Dá para fixar abertura e fechamento em `HH:MM` no lugar de `auto`. Para ações o padrão é 10:00–17:00, uma aproximação do mercado à vista, também editável. Leilões do pregão regular (sessão 1) permanecem nas barras.
+Dá para fixar abertura e fechamento em `HH:MM` no lugar de `auto`. Isso só move a janela `session_close`. A janela de antes do leilão do à vista ignora esses dois campos e usa o calendário abaixo. Leilões do pregão regular (sessão 1) permanecem nas barras.
+
+## Horário do mercado à vista
+
+A janela `before_cash_auction` é a meia hora contínua que termina quando começa o leilão de fechamento. O leilão são os últimos 5 minutos do pregão regular. O fim do sinal `cash_open` é a abertura do à vista mais `signal_minutes` (30 minutos → 10:30 na grade atual, 11:30 quando a abertura era 11:00). Os dois seguem o mesmo calendário, também quando o ativo operado é o WIN.
+
+A troca de grade vale no pregão de segunda-feira seguinte à mudança do relógio, o mesmo critério já usado no WIN: o intervalo do horário de verão americano é [segundo domingo de março, primeiro domingo de novembro).
+
+| Pregões | Abertura | Contínuo até | Leilão | Janela da operação |
+| --- | --- | --- | --- | --- |
+| Até 09/03/2012 | 11:00 | 17:55 | 17:55–18:00 | 17:25–17:55 |
+| 12/03/2012 a 18/12/2015 | 10:00 | 16:55 | 16:55–17:00 | 16:25–16:55 |
+| Desde 21/12/2015, com horário de verão nos EUA e sem horário de verão no Brasil | 10:00 | 16:55 | 16:55–17:00 | 16:25–16:55 |
+| Desde 21/12/2015, nos demais pregões | 10:00 | 17:55 | 17:55–18:00 | 17:25–17:55 |
+
+Setembro/2026 está na terceira linha (fechamento oficial às 17:00). Janeiro e o começo de novembro caem na quarta (fechamento às 18:00). O horário de verão brasileiro, enquanto existiu, não empurra o fechamento para as 19:00: em novembro–fevereiro, quando 16:00 em Nova York eram 19:00 em Brasília, o à vista continuou fechando às 18:00.
+
+Fontes:
+
+- Estado de Minas, 13/10/2011: a partir de 17/10/2011 o pregão regular foi para 11:00–18:00, e o fim do horário de verão americano em 07/11/2011 não alterou os demais produtos. Essa grade segue até a sexta 09/03/2012, inclusive depois que o relógio brasileiro voltou em 26/02/2012.
+- Exame, 12/03/2012: a partir dessa segunda, abertura às 10:00, contínuo até 17:00, call de 16:55 às 17:00.
+- CBN, 08/10/2012: no horário de verão de 2012 o pregão permanece 10:00–17:00. Nos anos anteriores a bolsa é que deslocava a sessão para 11:00–18:00.
+- UOL e Reuters, 21/12/2015: o à vista, que fechava às 17:00, passa a 10:00–18:00 até 11/03/2016. A alteração fica permanente, com horário regular de março a outubro e pregão uma hora mais longo no resto do ano; as datas efetivas acompanham o horário de verão. Não há after-market enquanto a extensão vale.
+- Exame, 20/09/2016: a partir de 17/10/2016 o pregão fecha às 18:00 até março de 2017, na segunda do horário de verão brasileiro, antes de os EUA saírem do deles.
+- Ofício Circular 007/2018-PRE: a partir de 12/03/2018, mercado à vista 10:00–16:55 e call 16:55–17:00. Antes dessa segunda a bolsa ainda operava até as 18:00 (ADVFN, 22/02/2018), o que cobre o intervalo entre o fim do horário de verão brasileiro em 18/02/2018 e o início do americano.
+- Suno, 05/11/2018: a partir dessa segunda o pregão é 10:00–18:00, sem voltar a abrir às 11:00. Nova York fechava às 19:00 no horário de Brasília, e a B3 não acompanhou essa hora extra.
+- Ofício Circular 002/2019-VOP: a partir de 11/03/2019, à vista 10:00–16:55 e call até 17:00.
+- Decreto 6.558/2008, com o adiamento quando o terceiro domingo de fevereiro é o domingo de Carnaval; Decreto 9.242/2017, que passou o início de 2018 para o primeiro domingo de novembro; Decreto 9.772/2019, que extinguiu o horário de verão. O último período terminou à 0h de 17/02/2019.
+- Valor Investe, 09/03/2020: o pregão regular volta a 10:00–17:00 porque os EUA entraram no horário de verão. O Ofício Circular 005/2020-VOP trata de flexibilização regulatória e circuit breaker, não de um fechamento mais cedo. A pandemia não entra neste calendário como pregão encurtado.
+- Ofícios Circulares 013/2024-PRE (a partir de 11/03/2024), 040/2025-VNC e 043/2025-VNC (a partir de 03/11/2025) e 005/2026-PRE (a partir de 09/03/2026), além da página de horário de negociação da B3: a grade vigente continua 10:00–16:55/17:00 no horário de verão americano e 10:00–17:55/18:00 fora dele.
+
+Premissas, onde a circular não foi encontrada pregão a pregão:
+
+- De 12/03/2012 a 18/12/2015 o à vista fica em 10:00–17:00 o ano inteiro, inclusive no inverno americano de 2013, 2014 e 2015. A reforma de dezembro de 2015 é descrita pela bolsa como o começo da extensão anual, e na semana anterior o pregão ainda ia até as 17:00. Não apareceu fechamento às 18:00 nesse intervalo.
+- Não há sessão das 19:00. O caso em que só o Brasil está em horário de verão permanece nas 18:00.
+- Quarta-feira de Cinzas, véspera de Natal e outros pregões extraordinários não têm grade própria. Nesses dias o calendário devolve o horário ordinário da época.
+- Feriados não mudam o relógio; simplesmente não há barra.
+
+Para uma ação, `session_bounds` devolve a abertura e o fim do leilão (17:00 ou 18:00, e 11:00–18:00 só até 09/03/2012).
 
 ## Estratégia de momentum
 
 Há duas referências de sinal, as duas na API (`signal_anchor`) e na tela:
 
-- `session_open` (padrão): preço no fim da primeira janela (30 minutos) dividido pela abertura do pregão, menos um. É o movimento só da manhã.
-- `prior_close`: o mesmo preço no fim da primeira janela dividido pelo fechamento anterior **do mesmo contrato**, menos um. Inclui o gap noturno, como em Gao, Han, Li e Zhou (2018), *Market intraday momentum*. Usa `return_versus_prior_close`. Se esse fechamento não está na série, o sinal daquele pregão é pulado — não se empresta o fechamento de outro vencimento.
+- `session_open` (padrão): preço no fim do sinal dividido pela abertura do pregão, menos um.
+- `prior_close`: o mesmo preço dividido pelo fechamento anterior **do mesmo contrato**, menos um. Inclui o gap noturno, como em Gao, Han, Li e Zhou (2018), *Market intraday momentum*. Usa `return_versus_prior_close`. Se esse fechamento não está na série, o sinal daquele pregão é pulado — não se empresta o fechamento de outro vencimento.
+
+O instante desse preço também é uma opção (`signal_end`), na API e na tela, e funciona com as duas referências:
+
+- `session_open` (padrão): `signal_minutes` depois da abertura do ativo. No WIN de hoje, 30 minutos terminam às 09:30, antes de as ações abrirem.
+- `cash_open`: `signal_minutes` depois da abertura do à vista. É o corte do artigo, meia hora após a abertura do mercado de ações. Hoje isso é 10:30; em 2012, enquanto a abertura era 11:00, era 11:30.
 
 Compra se passar do limiar, vende se ficar abaixo do limiar negativo, e fica de fora no meio.
 
 A janela da operação também tem duas opções (`trade_window`):
 
 - `session_close` (padrão): entra nos últimos `trade_minutes` (30) e zera no fechamento do pregão. No WIN automático isso é 17:55–18:25. Abertura, fechamento e duração continuam editáveis (`HH:MM` ou `auto`).
-- `before_cash_auction`: entra às 16:25 e zera às 16:55, antes do leilão de fechamento do mercado à vista. Os horários da outra opção continuam configuráveis; esta é a alternativa pronta para não operar depois que o à vista já fechou.
+- `before_cash_auction`: a meia hora contínua anterior ao leilão do à vista, no calendário da seção acima. Em setembro/2026 é 16:25–16:55. Quando o à vista fecha às 18:00, é 17:25–17:55. Não é um relógio fixo.
 
 Não há posição overnight. Um timeframe mais grosso que a janela do sinal não olha o miolo de uma barra ainda aberta: o pregão é pulado.
 
@@ -153,7 +196,7 @@ O walk-forward percorre janelas de treino e teste. Sem grade, os mesmos parâmet
 
 **Yahoo Finance.** Ações, com sufixo `.SA` se você não informar (`PETR4` vira `PETR4.SA`). 5 minutos até cerca de 60 dias corridos; 60 minutos até cerca de 730. O relógio da barra é o de abertura do candle.
 
-**CSV de barras.** Colunas `datetime` (ou `data` e `hora`), `open`/`abertura`, `high`/`máxima`, `low`/`mínima`, `close`/`fechamento` e `volume`/`quantidade`. Separador vírgula ou ponto e vírgula. Decimal com ponto ou vírgula. Horário sem fuso é `America/Sao_Paulo`. O mapeamento pode ser `{"Abertura": "open"}` ou `{"open": "Abertura"}`. Linhas que começam com `#` são comentário.
+**CSV de barras.** Colunas `datetime` ou `ts` (ou `data` e `hora`), `open`/`abertura`, `high`/`máxima`, `low`/`mínima`, `close`/`fechamento`, `volume`/`quantidade` e, se houver mais de um contrato, `ticker`. Separador vírgula ou ponto e vírgula. Decimal com ponto ou vírgula. Horário sem fuso é `America/Sao_Paulo`. O mapeamento pode ser `{"Abertura": "open"}` ou `{"open": "Abertura"}`. Linhas que começam com `#` são comentário. Com o símbolo `WIN` e vários vencimentos no arquivo, o loader usa o `win_ativo.csv` da mesma pasta e deixa um vencimento por pregão. Um ticker explícito, como `WINV26`, fica só com aquela série. Sem o `win_ativo.csv`, o pregão misto é pulado pela estratégia.
 
 ## Como acrescentar uma estratégia
 

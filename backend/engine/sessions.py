@@ -102,6 +102,97 @@ def is_win_expiration(day: date, contract: str | None) -> bool:
     return day == wednesday_closest_to_15(year, month)
 
 
+# Cash grades below. The closing call is the last five minutes of the
+# regular session; continuous trading stops when the call starts.
+CASH_CALL_MINUTES = 5
+CASH_PRE_AUCTION_MINUTES = 30
+# Monday the cash open moved from 11:00 to 10:00 (Exame, 12 Mar 2012).
+CASH_OPEN_1000_FROM = date(2012, 3, 12)
+# Monday the annual 18:00 extension started (BM&FBOVESPA, 21 Dec 2015).
+CASH_EXTENDED_CLOSE_FROM = date(2015, 12, 21)
+
+
+def easter_sunday(year: int) -> date:
+    """Gregorian Easter, Anonymous algorithm. Used only for the Carnival exception."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    g = (b - (b + 8) // 25 + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    ell = (32 + 2 * e + 2 * i - h - k) % 7
+    month, day = divmod(h + ell - 7 * ((a + 11 * h + 22 * ell) // 451) + 114, 31)
+    return date(year, month, day + 1)
+
+
+def brazilian_dst_bounds(end_year: int) -> tuple[date, date] | None:
+    """Daylight-saving season that ends in February of `end_year`.
+
+    Decreto 6.558/2008: from 00:00 on the third Sunday of October to 00:00
+    on the third Sunday of February, moved to the next Sunday when that day
+    is Carnival. Decreto 9.242/2017 moved the 2018/2019 start to the first
+    Sunday of November. Decreto 9.772/2019 abolished the measure; the last
+    season ended on 17 Feb 2019.
+    """
+    if end_year < 2012 or end_year > 2019:
+        return None
+    if end_year == 2019:
+        start = _nth_sunday(2018, 11, 1)
+    else:
+        start = _nth_sunday(end_year - 1, 10, 3)
+    end = _nth_sunday(end_year, 2, 3)
+    carnival = easter_sunday(end_year) - timedelta(days=49)
+    if end == carnival:
+        end += timedelta(days=7)
+    return start, end
+
+
+def is_brazilian_dst(day: date) -> bool:
+    for end_year in (day.year, day.year + 1):
+        bounds = brazilian_dst_bounds(end_year)
+        if bounds is not None and bounds[0] <= day < bounds[1]:
+            return True
+    return False
+
+
+def _plus(clock: time, minutes: int) -> time:
+    total = clock.hour * 60 + clock.minute + minutes
+    if not 0 <= total < 24 * 60:
+        raise ValueError("O horário do à vista saiu do dia civil.")
+    return time(total // 60, total % 60)
+
+
+def cash_open_close(day: date) -> tuple[time, time]:
+    """Official cash open and the end of the closing call.
+
+    The call itself is the last five minutes. See the README for the
+    circulars and for the winters that this function treats as 10:00–17:00
+    because no 18:00 extension was found before 21 Dec 2015.
+    """
+    if day < CASH_OPEN_1000_FROM:
+        return time(11, 0), time(18, 0)
+    if day < CASH_EXTENDED_CLOSE_FROM:
+        return time(10, 0), time(17, 0)
+    # 17:00 only while New York is on daylight saving time and Brazil is not.
+    # Brazilian DST no longer shifts the open to 11:00. The Nov–Feb stretch,
+    # when 16:00 in New York is 19:00 in Brasília, stays at an 18:00 close.
+    if is_us_dst(day) and not is_brazilian_dst(day):
+        return time(10, 0), time(17, 0)
+    return time(10, 0), time(18, 0)
+
+
+def cash_session(day: date) -> tuple[time, time, time]:
+    """Cash open, start of the closing call, and official close."""
+    open_t, close_t = cash_open_close(day)
+    return open_t, _plus(close_t, -CASH_CALL_MINUTES), close_t
+
+
+def cash_auction_window(day: date) -> tuple[time, time]:
+    """Continuous window that ends when the cash closing call starts."""
+    _, call_start, _ = cash_session(day)
+    return _plus(call_start, -CASH_PRE_AUCTION_MINUTES), call_start
+
+
 def session_bounds(
     family: str,
     day: date,
@@ -111,11 +202,12 @@ def session_bounds(
 
     WIN follows the B3 clock, including the 2024 change that kept the 18:25
     close all year and the earlier close of the expiring contract.
-    Equities use a fixed 10:00–17:00 window. Both can be overridden by the
-    strategy parameters.
+    Equities follow the cash calendar (open and the end of the closing call).
+    Both can be overridden by the strategy parameters.
     """
     if family != "WIN":
-        return time(10, 0), time(17, 0)
+        open_t, _, close_t = cash_session(day)
+        return open_t, close_t
 
     if is_win_expiration(day, contract):
         close = time(18, 0) if day >= WIN_EXPIRY_1800_FROM else time(17, 0)

@@ -54,8 +54,9 @@ function when(iso: string | null): string {
 
 function variantLabel(params: Record<string, unknown>): string {
   const anchor = params.signal_anchor === "prior_close" ? "Fechamento anterior" : "Abertura do pregão";
-  const windowName = params.trade_window === "before_cash_auction" ? "16:25–16:55" : "Até o fechamento";
-  return `${anchor} · ${windowName}`;
+  const end = params.signal_end === "cash_open" ? "Fim na abertura do à vista" : "Fim na abertura do WIN";
+  const windowName = params.trade_window === "before_cash_auction" ? "Antes do leilão do à vista" : "Até o fechamento do WIN";
+  return `${anchor} · ${end} · ${windowName}`;
 }
 
 function MetricCards({ metrics }: { metrics: Metrics }) {
@@ -114,13 +115,14 @@ export function App() {
   const [symbol, setSymbol] = useState("WIN");
   const [dataSource, setDataSource] = useState("csv");
   const [timeframe, setTimeframe] = useState("1min");
-  const [start, setStart] = useState("2026-09-17");
+  const [start, setStart] = useState("2026-09-01");
   const [end, setEnd] = useState("2026-09-30");
   const [useExample, setUseExample] = useState(true);
   const [file, setFile] = useState<File | null>(null);
   const [columnMap, setColumnMap] = useState("");
   const [signalMinutes, setSignalMinutes] = useState(30);
   const [signalAnchor, setSignalAnchor] = useState("session_open");
+  const [signalEnd, setSignalEnd] = useState("session_open");
   const [tradeMinutes, setTradeMinutes] = useState(30);
   const [tradeWindow, setTradeWindow] = useState("session_close");
   const [threshold, setThreshold] = useState(0);
@@ -219,6 +221,7 @@ export function App() {
       strategy_params: {
         signal_minutes: signalMinutes,
         signal_anchor: signalAnchor,
+        signal_end: signalEnd,
         trade_minutes: tradeMinutes,
         trade_window: tradeWindow,
         threshold,
@@ -271,11 +274,17 @@ export function App() {
       setStudy(await runStudy({
         ...payload,
         variants: [
-          { signal_anchor: "session_open", trade_window: "session_close" },
-          { signal_anchor: "session_open", trade_window: "before_cash_auction" },
-          { signal_anchor: "prior_close", trade_window: "session_close" },
-          { signal_anchor: "prior_close", trade_window: "before_cash_auction" },
-        ],
+          "session_open",
+          "prior_close",
+        ].flatMap((signal_anchor) =>
+          ["session_open", "cash_open"].flatMap((signal_end) =>
+            ["session_close", "before_cash_auction"].map((trade_window) => ({
+              signal_anchor,
+              signal_end,
+              trade_window,
+            })),
+          ),
+        ),
       }));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Não foi possível comparar as variantes.");
@@ -300,7 +309,7 @@ export function App() {
           <h1 className="brand">Meu Rico <span>Backtest</span></h1>
           <p className="lede">
             Simulação de day trade na B3. A primeira estratégia é o momentum intraday do WIN:
-            a primeira meia hora define a direção e a operação acontece na última meia hora.
+            o sinal da manhã define a direção e a operação acontece no fim do pregão ou antes do leilão do à vista.
           </p>
         </div>
         <div className="badge">Nenhuma ordem é enviada</div>
@@ -344,7 +353,7 @@ export function App() {
               <>
                 <label className="inline">
                   <input type="checkbox" checked={useExample} onChange={(event) => setUseExample(event.target.checked)} />
-                  Usar o CSV de exemplo do WINV26
+                  Usar as barras reais de setembro/2026 (WIN contínuo)
                 </label>
                 {!useExample && (
                   <label>
@@ -391,10 +400,20 @@ export function App() {
               O fechamento anterior é o de Gao, Han, Li e Zhou (2018). Se esse pregão do mesmo contrato não existir, o sinal é pulado.
             </p>
             <label>
+              Fim do sinal
+              <select value={signalEnd} onChange={(event) => setSignalEnd(event.target.value)}>
+                <option value="session_open">Minutos do sinal após a abertura do WIN</option>
+                <option value="cash_open">Minutos do sinal após a abertura do à vista</option>
+              </select>
+            </label>
+            <p className="hint">
+              Com 30 minutos, a segunda opção termina às 10:30 hoje. Quando a abertura do à vista era 11:00, termina às 11:30. Vale para a abertura e para o fechamento anterior.
+            </p>
+            <label>
               Janela da operação
               <select value={tradeWindow} onChange={(event) => setTradeWindow(event.target.value)}>
-                <option value="session_close">Últimos minutos até o fechamento</option>
-                <option value="before_cash_auction">16:25–16:55, antes do leilão do à vista</option>
+                <option value="session_close">Últimos minutos até o fechamento do WIN</option>
+                <option value="before_cash_auction">Antes do leilão de fechamento do à vista</option>
               </select>
             </label>
             <div className="grid-2">
@@ -428,7 +447,7 @@ export function App() {
               </label>
             </div>
             {tradeWindow === "before_cash_auction" ? (
-              <p className="hint">A operação entra às 16:25 e zera às 16:55. Abertura, fechamento e minutos continuam valendo na opção até o fechamento.</p>
+              <p className="hint">A meia hora termina quando começa o leilão do à vista. Em setembro/2026 isso é 16:25–16:55; quando o à vista fecha às 18h, a janela passa a 17:25–17:55. Abertura, fechamento e minutos continuam valendo na opção até o fechamento do WIN.</p>
             ) : (
               <p className="hint">A entrada é no início dos últimos minutos e a saída é no fechamento informado, ou no horário automático do ativo.</p>
             )}
@@ -530,7 +549,7 @@ export function App() {
             {comparing ? "Comparando variantes…" : "Comparar sinal e janela"}
           </button>
           <p className="hint">
-            WIN: R$ 0,50 por contrato por lado e 1 tick (5 pontos = R$ 1,00). Ação: 0,023% por lado sobre o valor negociado e 1 tick de R$ 0,01. A comparação usa as quatro combinações e o Sharpe deflacionado de cada uma leva o total de variantes.
+            WIN: R$ 0,50 por contrato por lado e 1 tick (5 pontos = R$ 1,00). Ação: 0,023% por lado sobre o valor negociado e 1 tick de R$ 0,01. A comparação cruza referência, fim do sinal e janela (oito variantes) e o Sharpe deflacionado de cada uma usa esse total.
           </p>
         </form>
         <section className="panel">
@@ -538,7 +557,7 @@ export function App() {
           {error && <div className="error">{error}</div>}
           {!result && !error && (
             <p className="empty">
-              Rode o exemplo do WINV26 para ver métricas, curva de capital e a lista de operações. O arquivo de exemplo já está no repositório e está marcado como exemplo.
+              Rode setembro/2026 para ver métricas, curva de capital e a lista de operações. As barras reais de WINV26 e WINZ26 estão no repositório; o contínuo fica só com a série de win_ativo.csv.
             </p>
           )}
           {result && (

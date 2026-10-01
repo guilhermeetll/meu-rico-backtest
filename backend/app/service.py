@@ -25,7 +25,7 @@ def sample_csv_path() -> Path:
     configured = os.environ.get("SAMPLE_DATA_PATH")
     if configured:
         return Path(configured)
-    return Path(__file__).resolve().parents[1] / "sample_data" / "win_exemplo_1min.csv"
+    return Path(__file__).resolve().parents[1] / "sample_data" / "win_set2026_1min.csv"
 
 
 def upload_dir() -> Path:

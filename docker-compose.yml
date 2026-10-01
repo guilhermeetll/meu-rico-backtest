@@ -20,7 +20,7 @@ services:
       B3_DATA_ROOT: /data/b3_ticks
       B3_META_ROOT: /data/b3_ticks_meta
       B3_BAR_CACHE_DIR: /data/b3_bars
-      SAMPLE_DATA_PATH: /app/sample_data/win_exemplo_1min.csv
+      SAMPLE_DATA_PATH: /app/sample_data/win_set2026_1min.csv
       UPLOAD_DIR: /data/uploads
     volumes:
       # No host, aponte para o histórico original. Exemplo do time:

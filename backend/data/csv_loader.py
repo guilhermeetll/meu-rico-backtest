@@ -9,9 +9,10 @@ import pandas as pd
 
 from data.bars import filter_dates, normalize_bars, resample_bars
 from data.base import DataRequest, LoadResult
+from data.continuous import restrict_contracts
 
 CANONICAL = {
-    "timestamp": ["timestamp", "datetime", "date_time", "datahora", "data_hora"],
+    "timestamp": ["timestamp", "datetime", "date_time", "datahora", "data_hora", "ts"],
     "date": ["date", "data", "dia", "pregao"],
     "time": ["time", "hora", "horario"],
     "open": ["open", "abertura", "open_price"],
@@ -28,8 +29,10 @@ class CsvBarsAdapter:
     label = "CSV de barras"
     description = (
         "Barras OHLCV. Colunas aceitas: datetime (ou data + hora), open/abertura, "
-        "high/máxima, low/mínima, close/fechamento e volume. Separador vírgula ou "
-        "ponto e vírgula. Horário sem fuso é America/Sao_Paulo. Um mapeamento de "
+        "high/máxima, low/mínima, close/fechamento e volume. timestamp também "
+        "aceita o nome ts, e ticker vira o contrato. Separador vírgula ou ponto "
+        "e vírgula. Horário sem fuso é America/Sao_Paulo. WIN com vários "
+        "vencimentos usa o win_ativo.csv da mesma pasta. Um mapeamento de "
         "colunas pode ser informado no pedido."
     )
 
@@ -42,15 +45,16 @@ class CsvBarsAdapter:
         frame = _read_table(path)
         renamed = _rename_columns(frame, request.column_map)
         built = _build_frame(renamed)
+        built, series_warnings = restrict_contracts(built, request.symbol, path)
         bars = normalize_bars(built)
         bars = filter_dates(bars, request.start, request.end)
         if bars.empty:
             raise ValueError("O CSV não tem barras no período pedido.")
         bars = resample_bars(bars, request.timeframe)
-        warning = None
+        warnings = list(series_warnings)
         if _looks_like_example(path):
-            warning = "Este arquivo é um exemplo incluído no repositório, não a base operacional."
-        return LoadResult(bars=bars, warnings=[warning] if warning else [])
+            warnings.append("Este arquivo é um exemplo incluído no repositório, não a base operacional.")
+        return LoadResult(bars=bars, warnings=warnings)
 
 
 def _looks_like_example(path: Path) -> bool:

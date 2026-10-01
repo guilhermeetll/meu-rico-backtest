@@ -7,13 +7,11 @@ import pandas as pd
 from engine.instruments import InstrumentSpec
 from engine.models import RawTrade
 from engine.series import contracts_of, return_versus_prior_close
-from engine.sessions import session_bounds
+from engine.sessions import cash_auction_window, cash_session, session_bounds
 from engine.strategies.base import ParamField, Strategy
 
-# Last half hour of the cash session, ending when the closing auction starts.
-CASH_PRE_AUCTION_START = time(16, 25)
-CASH_PRE_AUCTION_END = time(16, 55)
 SIGNAL_ANCHORS = ("session_open", "prior_close")
+SIGNAL_ENDS = ("session_open", "cash_open")
 TRADE_WINDOWS = ("session_close", "before_cash_auction")
 
 
@@ -55,10 +53,23 @@ class IntradayMomentumStrategy(Strategy):
                 "session_open",
                 options=SIGNAL_ANCHORS,
                 help=(
-                    "session_open mede da abertura até o fim da primeira janela. "
+                    "session_open mede da abertura até o fim do sinal. "
                     "prior_close mede do fechamento anterior do mesmo contrato até esse "
                     "instante, incluindo o gap noturno (Gao, Han, Li e Zhou, 2018). "
                     "Sem esse fechamento, o sinal é pulado."
+                ),
+            ),
+            ParamField(
+                "signal_end",
+                "Fim do sinal",
+                "string",
+                "session_open",
+                options=SIGNAL_ENDS,
+                help=(
+                    "session_open encerra o sinal signal_minutes depois da abertura do ativo. "
+                    "cash_open encerra signal_minutes depois da abertura do mercado à vista, "
+                    "no calendário da B3 (10:30 com os 30 minutos de hoje; 11:30 quando a "
+                    "abertura do à vista era 11:00). Vale para as duas referências."
                 ),
             ),
             ParamField("trade_minutes", "Janela da operação (minutos)", "int", 30, min=1, max=400,
@@ -71,9 +82,9 @@ class IntradayMomentumStrategy(Strategy):
                 options=TRADE_WINDOWS,
                 help=(
                     "session_close opera nos últimos trade_minutes até o fechamento configurado. "
-                    "before_cash_auction entra às 16:25 e zera às 16:55, antes do leilão de "
-                    "fechamento do mercado à vista. Abertura e fechamento continuam configuráveis "
-                    "na opção session_close."
+                    "before_cash_auction é a meia hora contínua que termina quando começa o "
+                    "leilão de fechamento do à vista. O relógio segue o calendário: 16:25–16:55 "
+                    "quando o à vista fecha às 17:00 e 17:25–17:55 quando fecha às 18:00."
                 ),
             ),
             ParamField("threshold", "Limiar do retorno", "float", 0.0, step=0.0001,
@@ -92,6 +103,7 @@ class IntradayMomentumStrategy(Strategy):
         threshold = float(resolved["threshold"])
         quantity = int(resolved["quantity"])
         signal_anchor = str(resolved["signal_anchor"]).strip().lower()
+        signal_end_mode = str(resolved["signal_end"]).strip().lower()
         trade_window = str(resolved["trade_window"]).strip().lower()
         if signal_minutes < 1 or trade_minutes < 1:
             raise ValueError("As janelas do sinal e da operação precisam ter ao menos 1 minuto.")
@@ -99,6 +111,8 @@ class IntradayMomentumStrategy(Strategy):
             raise ValueError("A quantidade precisa ser pelo menos 1.")
         if signal_anchor not in SIGNAL_ANCHORS:
             raise ValueError("A referência do sinal deve ser session_open ou prior_close.")
+        if signal_end_mode not in SIGNAL_ENDS:
+            raise ValueError("O fim do sinal deve ser session_open ou cash_open.")
         if trade_window not in TRADE_WINDOWS:
             raise ValueError("A janela da operação deve ser session_close ou before_cash_auction.")
         open_override = str(resolved["session_open"]).strip().lower()
@@ -123,10 +137,15 @@ class IntradayMomentumStrategy(Strategy):
             close_t = auto_close if close_override in {"", "auto"} else _clock(str(resolved["session_close"]))
             start = _at(day, open_t, tz)
             session_end = _at(day, close_t, tz)
-            signal_end = start + timedelta(minutes=signal_minutes)
+            cash_open, _, _ = cash_session(day)
+            if signal_end_mode == "cash_open":
+                signal_end = _at(day, cash_open, tz) + timedelta(minutes=signal_minutes)
+            else:
+                signal_end = start + timedelta(minutes=signal_minutes)
             if trade_window == "before_cash_auction":
-                trade_start = _at(day, CASH_PRE_AUCTION_START, tz)
-                trade_end = _at(day, CASH_PRE_AUCTION_END, tz)
+                window_start, window_end = cash_auction_window(day)
+                trade_start = _at(day, window_start, tz)
+                trade_end = _at(day, window_end, tz)
             else:
                 trade_start = session_end - timedelta(minutes=trade_minutes)
                 trade_end = session_end
