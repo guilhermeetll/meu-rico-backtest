@@ -458,7 +458,7 @@ export function App() {
               </label>
               <label>
                 Capital de referência
-                <input type="number" min={1} step="100" value={capital} onChange={(event) => setCapital(Number(event.target.value))} />
+                <input type="number" min={1} step="1" value={capital} onChange={(event) => setCapital(Number(event.target.value))} />
               </label>
             </div>
             <label>
