@@ -79,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rows: list[dict] = []
     failures: list[str] = []
+    fill_notes: list[str] = []
     cache: dict[tuple, object] = {}
     for source in sources:
         timeframe = args.timeframe or ("5min" if source == "yahoo" else "1min")
@@ -110,8 +111,12 @@ def main(argv: list[str] | None = None) -> int:
                     tax_rate=args.tax,
                     n_trials=trials,
                     bar_minutes={"1min": 1, "5min": 5, "60min": 60}[timeframe],
+                    trades=getattr(loaded, "trades", None),
                 )
                 for params, result in results:
+                    for warning in result.warnings:
+                        if warning.startswith("Preenchimento do ORB") and warning not in fill_notes:
+                            fill_notes.append(warning)
                     signal_skips = sum(1 for item in result.skipped if item.window == "signal")
                     trade_skips = sum(1 for item in result.skipped if item.window == "trade")
                     stats = _trade_stats(result, instrument.point_value)
@@ -146,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     md_path = stem.with_suffix(".md")
     _write_csv(csv_path, rows)
     md_path.write_text(
-        _markdown(rows, failures, trials, core_planned, extra_planned, start, end),
+        _markdown(rows, failures, trials, core_planned, extra_planned, start, end, fill_notes),
         encoding="utf-8",
     )
     print(md_path.read_text(encoding="utf-8"))
@@ -219,7 +224,10 @@ def _variant_label(strategy_id: str, params: dict) -> str:
         exit_name = "fim do dia" if exit_mode == "eod" else f"{exit_mode} min"
         return f"{_threshold_label(params)} · {exit_name}"
     if strategy_id == "opening_range_breakout":
-        return f"{params.get('range_minutes')} min"
+        minutes = params.get("range_minutes")
+        if str(params.get("execution", "stop")) == "confirm":
+            return f"orb_confirm · {minutes} min"
+        return f"{minutes} min"
     anchor = "fechamento anterior" if params.get("signal_anchor") == "prior_close" else "abertura"
     end = "à vista" if params.get("signal_end") == "cash_open" else "ativo"
     window = "antes do leilão" if params.get("trade_window") == "before_cash_auction" else "até o fechamento"
@@ -234,6 +242,7 @@ def _markdown(
     extra_planned: int,
     start: date,
     end: date,
+    fill_notes: list[str] | None = None,
 ) -> str:
     lines = [
         f"# Estudo {start.isoformat()} a {end.isoformat()}",
@@ -246,6 +255,9 @@ def _markdown(
         "O t-stat diário usa a média dos trades de cada pregão.",
         "",
     ]
+    for note in fill_notes or []:
+        lines.append(note)
+        lines.append("")
     lines.extend(_section("Núcleo", [row for row in rows if row["block"] == "núcleo"]))
     lines.extend(_section("Extras", [row for row in rows if row["block"] == "extra"]))
     if failures:

@@ -65,7 +65,8 @@ function variantLabel(params: Record<string, unknown>): string {
     return `Gap · ${threshold}${hold}`;
   }
   if (params.range_minutes !== undefined && params.signal_anchor === undefined) {
-    return `ORB · ${params.range_minutes} min`;
+    const name = params.execution === "confirm" ? "orb_confirm · " : "";
+    return `ORB · ${name}${params.range_minutes} min`;
   }
   const anchor = params.signal_anchor === "prior_close" ? "Fechamento anterior" : "Abertura do pregão";
   const end = params.signal_end === "cash_open" ? "Fim na abertura do à vista" : "Fim na abertura do WIN";
@@ -81,7 +82,10 @@ function gridVariants(strategy: string): Record<string, unknown>[] {
     return [...core, ...extras];
   }
   if (strategy === "opening_range_breakout") {
-    return [{ range_minutes: 5 }, { range_minutes: 15 }, { range_minutes: 30 }];
+    const ranges = [5, 15, 30];
+    const stop = ranges.map((range_minutes) => ({ range_minutes, execution: "stop" }));
+    const confirm = ranges.map((range_minutes) => ({ range_minutes, execution: "confirm" }));
+    return [stop[0], ...stop.slice(1), ...confirm];
   }
   return ["session_open", "prior_close"].flatMap((signal_anchor) =>
     ["session_open", "cash_open"].flatMap((signal_end) =>
@@ -159,6 +163,7 @@ export function App() {
   const [gapExit, setGapExit] = useState("15");
   const [gapThreshold, setGapThreshold] = useState(0.005);
   const [rangeMinutes, setRangeMinutes] = useState(5);
+  const [orbExecution, setOrbExecution] = useState("stop");
   const [signalMinutes, setSignalMinutes] = useState(30);
   const [signalAnchor, setSignalAnchor] = useState("session_open");
   const [signalEnd, setSignalEnd] = useState("session_open");
@@ -299,7 +304,7 @@ export function App() {
       return { threshold: gapThreshold, exit: gapExit, ...coverage };
     }
     if (strategy === "opening_range_breakout") {
-      return { range_minutes: rangeMinutes, ...coverage };
+      return { range_minutes: rangeMinutes, execution: orbExecution, ...coverage };
     }
     return {
       signal_minutes: signalMinutes,
@@ -487,8 +492,15 @@ export function App() {
                     <option value={30}>30 minutos</option>
                   </select>
                 </label>
+                <label>
+                  Execução
+                  <select value={orbExecution} onChange={(event) => setOrbExecution(event.target.value)}>
+                    <option value="stop">Ordem stop na borda</option>
+                    <option value="confirm">orb_confirm</option>
+                  </select>
+                </label>
                 <p className="hint">
-                  A faixa começa no primeiro negócio e dura os minutos escolhidos. O primeiro fechamento fora dela entra na barra seguinte, com stop no outro extremo. A saída forçada é no fim do contínuo, às 16:55, ou no último negócio regular se o pregão parar antes. O núcleo é a faixa de 5 minutos; 15 e 30 minutos são extras. No máximo uma operação por pregão.
+                  A faixa começa no primeiro negócio. No núcleo, a ordem stop executa no primeiro negócio que encosta ou atravessa a borda, e o stop fica no outro extremo. Cada preço piora 1 tick no slippage. orb_confirm espera o fechamento fora da faixa e entra na abertura da barra seguinte. A saída forçada é no fim do contínuo, às 16:55, ou no último negócio regular se o pregão parar antes. O núcleo é a faixa de 5 minutos em ordem stop. As faixas de 15 e 30 minutos e as três de orb_confirm são extras e entram no N.
                 </p>
                 <label>
                   Quantidade

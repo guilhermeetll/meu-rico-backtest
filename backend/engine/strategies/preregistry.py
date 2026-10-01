@@ -25,8 +25,12 @@ GAP_EXTRAS: list[dict] = [
 ]
 GAP_VARIANTS: list[dict] = GAP_CORE + GAP_EXTRAS
 
-ORB_CORE: list[dict] = [{"range_minutes": 5}]
-ORB_EXTRAS: list[dict] = [{"range_minutes": minutes} for minutes in (15, 30)]
+ORB_CORE: list[dict] = [{"range_minutes": 5, "execution": "stop"}]
+ORB_EXTRAS: list[dict] = [
+    {"range_minutes": minutes, "execution": "stop"} for minutes in (15, 30)
+] + [
+    {"range_minutes": minutes, "execution": "confirm"} for minutes in (5, 15, 30)
+]
 ORB_VARIANTS: list[dict] = ORB_CORE + ORB_EXTRAS
 
 CORE_PER_INSTRUMENT = len(GAP_CORE) + len(ORB_CORE)
@@ -48,5 +52,7 @@ def is_core(strategy_id: str, params: dict) -> bool:
     if strategy_id == "gap_reversal":
         return str(params.get("exit", "15")) == "15"
     if strategy_id == "opening_range_breakout":
+        if str(params.get("execution", "stop")) == "confirm":
+            return False
         return int(params.get("range_minutes", 5)) == 5
     return False

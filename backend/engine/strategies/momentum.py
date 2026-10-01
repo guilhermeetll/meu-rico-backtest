@@ -125,7 +125,7 @@ class IntradayMomentumStrategy(Strategy):
             ),
         ]
 
-    def generate(self, bars, params, instrument: InstrumentSpec, bar_minutes: int):
+    def generate(self, bars, params, instrument: InstrumentSpec, bar_minutes: int, trades=None):
         resolved = self.resolved_params(params)
         signal_minutes = int(resolved["signal_minutes"])
         trade_minutes = int(resolved["trade_minutes"])

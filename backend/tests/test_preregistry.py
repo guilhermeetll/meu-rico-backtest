@@ -15,6 +15,7 @@ from engine.strategies.preregistry import (
     MOMENTUM_VARIANTS,
     ORB_CORE,
     ORB_EXTRAS,
+    is_core,
 )
 
 
@@ -23,11 +24,20 @@ def test_catalog_splits_the_core_from_the_extras():
     assert [item["exit"] for item in GAP_CORE] == ["15", "15", "15"]
     assert [item["threshold"] for item in GAP_CORE] == [0.005, 0.01, 0.015]
     assert len(GAP_EXTRAS) == 6
-    assert ORB_CORE == [{"range_minutes": 5}]
-    assert [item["range_minutes"] for item in ORB_EXTRAS] == [15, 30]
+    assert ORB_CORE == [{"range_minutes": 5, "execution": "stop"}]
+    assert ORB_EXTRAS == [
+        {"range_minutes": 15, "execution": "stop"},
+        {"range_minutes": 30, "execution": "stop"},
+        {"range_minutes": 5, "execution": "confirm"},
+        {"range_minutes": 15, "execution": "confirm"},
+        {"range_minutes": 30, "execution": "confirm"},
+    ]
+    assert is_core("opening_range_breakout", {"range_minutes": 5, "execution": "stop"})
+    assert not is_core("opening_range_breakout", {"range_minutes": 5, "execution": "confirm"})
+    assert not is_core("opening_range_breakout", {"range_minutes": 15, "execution": "stop"})
     assert CORE_PER_INSTRUMENT == 4
-    assert EXTRA_PER_INSTRUMENT == 8
-    assert CATALOG_TRIALS == 20
+    assert EXTRA_PER_INSTRUMENT == 11
+    assert CATALOG_TRIALS == 23
     text = Path("/workspace/docs/preregistro.md").read_text(encoding="utf-8")
     assert "Núcleo" in text
     assert "Extras" in text
@@ -36,6 +46,8 @@ def test_catalog_splits_the_core_from_the_extras():
     assert "pelo menos 1 minuto depois do primeiro negócio" in text
     assert "30 minutos" in text
     assert "16:49" in text
+    assert "orb_confirm" in text
+    assert "ordem stop" in text
 
 
 def test_cli_writes_the_grid_and_keeps_a_larger_n(tmp_path: Path):

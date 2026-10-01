@@ -41,6 +41,7 @@ def run_study(
     bar_minutes: int,
     sample_split: SampleSplit | None = None,
     walk_forward: WalkForwardConfig | None = None,
+    trades=None,
 ) -> tuple[int, list[tuple[dict, BacktestResult]]]:
     trials = trial_count(n_trials, len(variants))
     results: list[tuple[dict, BacktestResult]] = []
@@ -61,6 +62,7 @@ def run_study(
                     bar_minutes=bar_minutes,
                     sample_split=sample_split,
                     walk_forward=walk_forward,
+                    trades=trades,
                 ),
             )
         )

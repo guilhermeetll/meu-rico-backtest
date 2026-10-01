@@ -66,6 +66,7 @@ def run_backtest(
     bar_minutes: int,
     sample_split: SampleSplit | None = None,
     walk_forward: WalkForwardConfig | None = None,
+    trades=None,
 ) -> BacktestResult:
     if bars is None or len(bars) == 0:
         raise ValueError("Não há barras para o período pedido.")
@@ -73,7 +74,7 @@ def run_backtest(
         raise ValueError("Timeframe inválido.")
 
     sessions = sorted(set(bars["timestamp"].dt.date))
-    raw, warnings, skipped = strategy.generate(bars, params, instrument, bar_minutes)
+    raw, warnings, skipped = strategy.generate(bars, params, instrument, bar_minutes, trades=trades)
     trades = execute(raw, instrument, costs, symbol)
     metrics, equity = performance(trades, sessions, initial_capital, tax_rate, n_trials)
 
@@ -107,6 +108,7 @@ def run_backtest(
             n_trials=n_trials,
             bar_minutes=bar_minutes,
             config=walk_forward,
+            trades=trades,
         )
         warnings.extend(wf_warnings)
 

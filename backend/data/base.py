@@ -22,3 +22,4 @@ class DataRequest:
 class LoadResult:
     bars: pd.DataFrame
     warnings: list[str] = field(default_factory=list)
+    trades: pd.DataFrame | None = None

@@ -134,6 +134,7 @@ class GapReversalStrategy(Strategy):
         params: dict,
         instrument: InstrumentSpec,
         bar_minutes: int,
+        trades=None,
     ) -> tuple[list[RawTrade], list[str], list[SkippedSession]]:
         resolved = self.resolved_params(params)
         exit_mode = _exit_mode(resolved["exit"])

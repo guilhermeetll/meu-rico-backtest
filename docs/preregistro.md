@@ -2,7 +2,7 @@
 
 Este arquivo fixa as configurações antes de olhar qualquer resultado. O que está aqui não é reescolhido depois do backtest. Custos, slippage, IR, calendário e a regra de pregão incompleto são os que o motor já usa.
 
-O catálogo do projeto tem **20** configurações: 8 de momentum, 9 de reversão do gap e 3 de rompimento da faixa de abertura. Gap e ORB se dividem em núcleo e extras. Os extras também entram no N do Sharpe deflacionado.
+O catálogo do projeto tem **23** configurações: 8 de momentum, 9 de reversão do gap e 6 de rompimento da faixa de abertura. Gap e ORB se dividem em núcleo e extras. Os extras também entram no N do Sharpe deflacionado.
 
 ## Momentum intraday
 
@@ -40,22 +40,25 @@ Ceretta e Da Costa (2017), *Economics Bulletin* 37(4). Três limiares, a mesma s
 
 ### ORB
 
-Uma variante: faixa de 5 minutos.
+Uma variante no núcleo: faixa de 5 minutos, execução `stop` (ordem stop na borda).
 
 - Faixa: máxima e mínima de `[primeiro negócio, primeiro negócio + 5 min)`. A cobertura do PR #4 mede essa janela a partir do primeiro negócio, não de 10:00–10:05. Um leilão às 10:08 produz a faixa 10:08–10:13.
 - As duas janelas são verificadas antes de procurar rompimento. A faixa é `window=signal`. A operação vai do fim da faixa até a saída forçada e é `window=trade`. Sem primeiro negócio dentro da tolerância de 30 minutos, o pregão é pulado (`window=signal`).
-- O primeiro fechamento estritamente fora da faixa define o lado. A entrada é o open da barra seguinte. No máximo uma operação por dia. Se o rompimento é a última barra, não há entrada e o dia não é pulado.
-- Stop no outro extremo. Abertura além do stop sai nesse open. Abertura exatamente no stop sai no stop nesse instante. Encosto no stop sai no preço do stop no fechamento da barra. Sem alvo.
-- Saída forçada: fim do contínuo, quando começa o leilão de fechamento do à vista. O relógio é o do calendário, o mesmo para ações e WIN. No pregão ordinário vigente isso é 16:55. Na Quarta-feira de Cinzas o call começa às 17:55, e a saída vai para lá. Não é o fechamento do WIN às 18:25. O preço é o close da barra que termina nesse instante (1 minuto: 16:54; 5 minutos: 16:50).
+- Entrada: o primeiro negócio, depois do fim da faixa, que encosta ou atravessa um extremo. O stop fica no outro extremo e sai no primeiro negócio que encosta ou atravessa esse extremo. No máximo uma operação por dia. Sem alvo.
+- Os dois preços, e também a saída forçada, pioram 1 tick. Esse tick é o slippage que o modelo de custos já cobra. O preço cru da operação é a borda, a abertura ou o negócio real; o tick não é somado de novo por cima. Corretagem e emolumentos não mudam.
+- Se a carga só tem barras OHLC de 1 minuto, a entrada é a borda quando a barra abre dentro da faixa ou em cima dela, e é o open quando a barra já abre fora (gap através da borda). O stop usa a mesma regra. Se a barra da entrada também toca o outro extremo, a operação é stopada nessa mesma barra: a ordem dos negócios não aparece no OHLC, e esse é o caso pessimista. Abertura dentro da faixa com os dois extremos tocados entra na máxima e para na mínima. Abertura fora de um lado, com o outro extremo também tocado, entra nesse open e para no outro extremo. Um candle mais grosso, como o de 5 minutos do Yahoo, segue a mesma regra no candle inteiro, porque também não tem a sequência dos negócios.
+- Se o ZIP do tickercsv já está na base, a entrada e o stop usam o preço do primeiro negócio real que encosta ou atravessa o nível. Isso é melhor do que assumir a borda. O motor não baixa o ZIP para obter esse preço. Sem o arquivo, o pregão cai na aproximação OHLC. O relatório diz qual dos dois métodos rodou.
+- Saída forçada: fim do contínuo, quando começa o leilão de fechamento do à vista. O relógio é o do calendário, o mesmo para ações e WIN. No pregão ordinário vigente isso é 16:55. Na Quarta-feira de Cinzas o call começa às 17:55, e a saída vai para lá. Não é o fechamento do WIN às 18:25. O preço é o close da barra que termina nesse instante (1 minuto: 16:54; 5 minutos: 16:50), ou o último negócio real até esse instante quando o tickercsv está disponível. Também leva o 1 tick do modelo de custos.
 - Se essa barra não existe e a posição está aberta, a saída é o close do último negócio regular antes do call, dentro de `close_tolerance_minutes` (padrão 15). Um contínuo que para às 16:49 sai no close dessa barra, com aviso, e o pregão não é pulado. Um negócio às 17:05 já é leilão e não serve de saída. Sem negócio dentro da tolerância, aí sim a janela da operação é pulada.
 
 ## Extras
 
-Oito variantes por instrumento. Entram no mesmo comando e no mesmo N do Sharpe deflacionado. Não substituem o núcleo.
+Onze variantes por instrumento. Entram no mesmo comando e no mesmo N do Sharpe deflacionado. Não substituem o núcleo.
 
 - Gap com os mesmos três limiares e saída em 30 minutos, no mesmo desenho dos 15: open da barra que começa 30 minutos depois da entrada.
 - Gap com os mesmos três limiares e saída no fim do dia. Fim do dia é o mesmo instante da saída forçada do ORB: 16:55 nas ações e no WIN no pregão ordinário vigente, ou o início do call quando o calendário muda.
-- ORB com faixas de 15 e 30 minutos. Stop e saída forçada iguais aos do núcleo.
+- ORB `stop` com faixas de 15 e 30 minutos. A ordem na borda, o stop e a saída forçada são os do núcleo.
+- `orb_confirm` com faixas de 5, 15 e 30 minutos. É a regra anterior: o primeiro fechamento estritamente fora da faixa define o lado, e a entrada é o open da barra seguinte. Se o rompimento é a última barra, não há entrada e o dia não é pulado. O stop e a saída forçada são os do núcleo, inclusive o 1 tick do modelo de custos. A faixa de 5 minutos nesta variante é extra, não núcleo. As três contam no N.
 
 Se a saída de 15 ou 30 minutos cair depois do fim do contínuo, ela encosta nesse fim e usa o preço de fim de dia. Isso é o limite do pregão, não uma escolha a mais.
 
@@ -65,7 +68,7 @@ Custos padrão do instrumento (WIN: R$ 0,50 por contrato por lado e 1 tick; aç�
 
 ## N de cada estudo
 
-Por instrumento, o núcleo tem 4 linhas e os extras têm 8. O Sharpe deflacionado de todas as linhas do comando, núcleo e extras, usa N = linhas do núcleo + linhas dos extras, vezes ativos e fontes. Os extras contam nesse N. `--n-trials` maior substitui esse número, para informar o N acumulado do projeto (o catálogo completo é 20). Um valor menor não reduz N.
+Por instrumento, o núcleo tem 4 linhas e os extras têm 11. O Sharpe deflacionado de todas as linhas do comando, núcleo e extras, usa N = linhas do núcleo + linhas dos extras, vezes ativos e fontes. Os extras contam nesse N, inclusive as três de `orb_confirm`. `--n-trials` maior substitui esse número, para informar o N acumulado do projeto (o catálogo completo é 23). Um valor menor não reduz N. Um comando com WIN e uma fonte, nas duas estratégias, tem N = 15. O mesmo comando nas 9 ações tem N = 135.
 
 O relatório mostra o núcleo primeiro e os extras depois. A média líquida, a taxa de acerto e os dois t-stats são por operação, depois dos custos e antes do IR mensal. O retorno da operação é o pnl dividido pelo nocional (`preço de entrada × valor do ponto × quantidade`). O t-stat por trade é a média desses retornos dividida pelo erro padrão, com desvio amostral. O t-stat diário faz antes a média dos trades de cada pregão, inclusive quando vários ativos operam no mesmo dia, e só então calcula o t-stat dessa série. Trades do mesmo dia deixam de contar como observações independentes. Dia sem trade não entra nessa série.
 
