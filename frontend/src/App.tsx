@@ -500,7 +500,7 @@ export function App() {
                   </select>
                 </label>
                 <p className="hint">
-                  A faixa começa no primeiro negócio. No núcleo, a ordem stop executa no primeiro negócio que encosta ou atravessa a borda, e o stop fica no outro extremo. Cada preço piora 1 tick no slippage. orb_confirm espera o fechamento fora da faixa e entra na abertura da barra seguinte. A saída forçada é no fim do contínuo, às 16:55, ou no último negócio regular se o pregão parar antes. O núcleo é a faixa de 5 minutos em ordem stop. As faixas de 15 e 30 minutos e as três de orb_confirm são extras e entram no N.
+                  A faixa começa no primeiro negócio. No núcleo, a compra só dispara acima da máxima e a venda só abaixo da mínima. Encostar na borda não entra. Nas barras, o preço cru é a borda mais 1 tick, ou a abertura se ela já estiver mais longe, e o slippage soma outro tick. O stop dispara quando o preço encosta ou atravessa o outro extremo. orb_confirm espera o fechamento fora da faixa e entra na abertura da barra seguinte. A saída forçada é no fim do contínuo, às 16:55, ou no último negócio regular se o pregão parar antes. O núcleo é a faixa de 5 minutos em ordem stop. As faixas de 15 e 30 minutos e as três de orb_confirm são extras e entram no N.
                 </p>
                 <label>
                   Quantidade

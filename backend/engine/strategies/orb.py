@@ -1,15 +1,15 @@
 """Opening-range breakout, the control strategy in docs/preregistro.md.
 
 The range is the high and the low from the first regular print through the
-next N minutes, N in {5, 15, 30}. The core execution is a stop order at the
-edge: the first print that touches or crosses a side after the range, with
-the other side as the stop. `execution=confirm` keeps the previous rule
+next N minutes, N in {5, 15, 30}. The core buys only above the high and
+sells only below the low. Touching the edge is not an entry. On OHLC bars
+the raw fill is one tick beyond that edge, unless the bar already opened
+further out, and the cost model then adds another tick of slippage. A
+tickercsv print is used as-is and only the cost-model tick is added. The
+stop still fires on a touch. `execution=confirm` keeps the previous rule
 (a close outside the range, filled on the next bar's open) as the extra
 named orb_confirm. There is no target. Whatever is left exits at the end of
 continuous trading.
-
-Raw prices are the market prints. The cost model adds the single adverse
-tick. This module does not add a second one.
 """
 
 from __future__ import annotations
@@ -44,13 +44,20 @@ EXECUTIONS = ("stop", "confirm")
 
 OHLC_FILL_NOTE = (
     "Preenchimento do ORB: aproximação OHLC. "
-    "A entrada é a borda da faixa quando a barra abre dentro, ou o preço de abertura quando a barra já abre fora. "
-    "O stop segue a mesma regra. Se a barra da entrada também toca o outro extremo, a saída é nessa mesma barra. "
-    "Cada preço ainda piora 1 tick no modelo de custos; corretagem e emolumentos não mudam."
+    "A compra dispara se a máxima da barra passa da máxima da faixa, e a venda se a mínima fica abaixo da mínima. "
+    "Encostar na borda não entra. "
+    "O preço cru é o maior entre a abertura e a borda mais 1 tick na compra, "
+    "ou o menor entre a abertura e a borda menos 1 tick na venda, "
+    "e o modelo de custos soma mais 1 tick de slippage. "
+    "O stop dispara quando o preço encosta ou atravessa o outro extremo, com 1 tick de slippage. "
+    "Se a barra da entrada também toca o stop, a saída é nessa mesma barra. "
+    "Corretagem e emolumentos não mudam."
 )
 TICK_FILL_NOTE = (
-    "Preenchimento do ORB: preço do primeiro negócio real do tickercsv que encosta ou atravessa o nível. "
-    "Cada preço ainda piora 1 tick no modelo de custos; corretagem e emolumentos não mudam."
+    "Preenchimento do ORB: primeiro negócio do tickercsv estritamente fora da faixa, mais 1 tick de slippage. "
+    "Encostar na borda não entra. "
+    "O stop dispara no primeiro negócio que encosta ou atravessa o outro extremo, com 1 tick de slippage. "
+    "Corretagem e emolumentos não mudam."
 )
 
 
@@ -76,10 +83,11 @@ class OpeningRangeBreakoutStrategy(Strategy):
     label = "Rompimento da faixa de abertura"
     description = (
         "A faixa começa no primeiro negócio e dura 5, 15 ou 30 minutos. "
-        "No núcleo, uma ordem stop na borda executa no primeiro negócio que encosta ou atravessa o extremo, "
-        "e o stop fica no outro extremo. orb_confirm espera o fechamento fora da faixa e entra na abertura da barra seguinte. "
+        "No núcleo, a compra só dispara acima da máxima da faixa e a venda só abaixo da mínima. "
+        "Encostar na borda não entra. O stop fica no outro extremo e dispara ao encostar. "
+        "orb_confirm espera o fechamento fora da faixa e entra na abertura da barra seguinte. "
         "Sem alvo: o que não parar sai no fim do contínuo, às 16:55 no pregão ordinário, "
-        "ou no último negócio regular se o pregão parar antes. O 1 tick de slippage fica no modelo de custos. "
+        "ou no último negócio regular se o pregão parar antes. "
         "No máximo uma operação por dia."
     )
 
@@ -251,6 +259,7 @@ class OpeningRangeBreakoutStrategy(Strategy):
                         ohlc_fallback_days.append(day.isoformat())
                     trade = _stop_order(
                         after, range_high, range_low, trade_end, bar_delta, quantity, day,
+                        instrument.tick_size,
                     )
             if trade is not None:
                 if (
@@ -333,39 +342,55 @@ def _boundary_fill(opened: float, level: float, *, upper: bool) -> float:
     return level if opened >= level else opened
 
 
-def _touch(opened: float, high: float, low: float, range_high: float, range_low: float):
+def _entry_fill(opened: float, level: float, tick: float, *, upper: bool) -> float:
+    """First price strictly outside the edge, unless the bar already opened beyond it."""
+    if upper:
+        return max(opened, level + tick)
+    return min(opened, level - tick)
+
+
+def _breakout(opened: float, high: float, low: float, range_high: float, range_low: float, tick: float):
     """Return (direction, entry, stop_level_or_fill, same_bar) or None.
 
-    same_bar means the entry bar also reached the stop. The stop price is
-    then the fill, not only the level. An inside open that touches both
-    sides is a long at the high and a stop at the low: the larger notional.
+    A buy needs the high strictly above the range. A sell needs the low
+    strictly below it. Touching the edge is not an entry. The stop still
+    fires on a touch. same_bar means that stop is on the entry bar.
+    An inside open that leaves both sides is a long: the larger notional.
     """
-    up = high >= range_high
-    down = low <= range_low
+    up = high > range_high
+    down = low < range_low
     if not up and not down:
         return None
     if up and down:
         if opened > range_high:
-            return 1, opened, _boundary_fill(opened, range_low, upper=False), True
+            return 1, _entry_fill(opened, range_high, tick, upper=True), _boundary_fill(opened, range_low, upper=False), True
         if opened < range_low:
-            return -1, opened, _boundary_fill(opened, range_high, upper=True), True
+            return -1, _entry_fill(opened, range_low, tick, upper=False), _boundary_fill(opened, range_high, upper=True), True
         if opened == range_low and opened < range_high:
-            return -1, range_low, range_high, True
+            return -1, _entry_fill(opened, range_low, tick, upper=False), range_high, True
         return (
             1,
-            _boundary_fill(opened, range_high, upper=True),
+            _entry_fill(opened, range_high, tick, upper=True),
             _boundary_fill(opened, range_low, upper=False),
             True,
         )
     if up:
-        return 1, _boundary_fill(opened, range_high, upper=True), range_low, False
-    return -1, _boundary_fill(opened, range_low, upper=False), range_high, False
+        entry = _entry_fill(opened, range_high, tick, upper=True)
+        if low <= range_low:
+            return 1, entry, _boundary_fill(opened, range_low, upper=False), True
+        return 1, entry, range_low, False
+    entry = _entry_fill(opened, range_low, tick, upper=False)
+    if high >= range_high:
+        return -1, entry, _boundary_fill(opened, range_high, upper=True), True
+    return -1, entry, range_high, False
 
 
-def _stop_order(after: pd.DataFrame, range_high: float, range_low: float, trade_end, bar_delta, quantity: int, day):
+def _stop_order(after: pd.DataFrame, range_high: float, range_low: float, trade_end, bar_delta, quantity: int, day, tick: float):
     rows = list(after.sort_values("timestamp").to_dict("records"))
     for index, row in enumerate(rows):
-        decision = _touch(float(row["open"]), float(row["high"]), float(row["low"]), range_high, range_low)
+        decision = _breakout(
+            float(row["open"]), float(row["high"]), float(row["low"]), range_high, range_low, tick,
+        )
         if decision is None:
             continue
         direction, entry_price, stop, same_bar = decision
@@ -410,7 +435,7 @@ def _stop_order_from_trades(
     quantity: int,
     day,
 ):
-    """First real print at or through a side. The stop is the next print at the other side."""
+    """First print strictly outside the range. The stop is the next print that touches the other side."""
     end = pd.Timestamp(trade_end)
     start = pd.Timestamp(range_end)
     stamps = day_trades["timestamp"]
@@ -418,11 +443,11 @@ def _stop_order_from_trades(
     records = list(selected.to_dict("records"))
     for index, row in enumerate(records):
         price = float(row["price"])
-        if price >= range_high:
+        if price > range_high:
             direction = 1
             level = range_high
             stop = range_low
-        elif price <= range_low:
+        elif price < range_low:
             direction = -1
             level = range_low
             stop = range_high

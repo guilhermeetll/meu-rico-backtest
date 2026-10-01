@@ -202,7 +202,7 @@ def _equity_range() -> list[dict]:
     ]
 
 
-def test_a_bar_that_opens_inside_enters_at_the_edge_plus_one_tick():
+def test_a_bar_that_opens_inside_fills_one_tick_beyond_the_edge_before_slippage():
     long, warnings, skipped = _generate([
         *_equity_range(),
         _bar(DAY, 10, 5, 10, 11.5, 10, 11.2),
@@ -215,13 +215,55 @@ def test_a_bar_that_opens_inside_enters_at_the_edge_plus_one_tick():
     ], instrument=PETR4)
     assert skipped == []
     assert long[0].direction == 1
-    assert long[0].entry_price == 11
+    assert long[0].entry_price == pytest.approx(11.01)
     assert long[0].entry_time.hour == 10 and long[0].entry_time.minute == 5
-    assert _paid(long[0]).entry_price_effective == pytest.approx(11.01)
+    assert _paid(long[0]).entry_price_effective == pytest.approx(11.02)
     assert short[0].direction == -1
-    assert short[0].entry_price == 9
-    assert _paid(short[0]).entry_price_effective == pytest.approx(8.99)
+    assert short[0].entry_price == pytest.approx(8.99)
+    assert _paid(short[0]).entry_price_effective == pytest.approx(8.98)
     assert any("aproximação OHLC" in warning for warning in warnings)
+
+
+def test_touching_the_edge_does_not_enter():
+    high_touch, _, skipped = _generate([
+        *_equity_range(),
+        _bar(DAY, 10, 5, 10, 11, 10, 10.5),
+        _bar(DAY, 16, 54, 10, 10, 10, 10),
+    ], instrument=PETR4)
+    low_touch, _, _ = _generate([
+        *_equity_range(),
+        _bar(DAY, 10, 5, 10, 10, 9, 9.5),
+        _bar(DAY, 16, 54, 10, 10, 10, 10),
+    ], instrument=PETR4)
+    both, _, _ = _generate([
+        *_equity_range(),
+        _bar(DAY, 10, 5, 10, 11, 9, 10),
+        _bar(DAY, 16, 54, 10, 10, 10, 10),
+    ], instrument=PETR4)
+    prints = pd.DataFrame({
+        "timestamp": [
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 5, 1, tzinfo=TZ)),
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 16, 54, 10, tzinfo=TZ)),
+        ],
+        "price": [11.0, 10.0],
+    })
+    from_ticks, _, tick_skipped = OpeningRangeBreakoutStrategy().generate(
+        _frame([
+            *_equity_range(),
+            _bar(DAY, 10, 5, 10, 11, 10, 10.5),
+            _bar(DAY, 16, 54, 10, 10, 10, 10),
+        ]),
+        {"min_bar_coverage": 0, "range_minutes": 5, "execution": "stop"},
+        PETR4,
+        1,
+        trades=prints,
+    )
+    assert skipped == []
+    assert tick_skipped == []
+    assert high_touch == []
+    assert low_touch == []
+    assert both == []
+    assert from_ticks == []
 
 
 def test_a_bar_that_opens_outside_enters_at_the_open_plus_one_tick():
@@ -258,12 +300,12 @@ def test_entry_and_stop_on_the_same_bar():
     assert skipped == []
     assert len(inside) == 1
     assert inside[0].direction == 1
-    assert inside[0].entry_price == 11
+    assert inside[0].entry_price == pytest.approx(11.01)
     assert inside[0].exit_price == 9
     assert inside[0].entry_time.minute == 5
     assert inside[0].exit_time.minute == 6
     paid = _paid(inside[0])
-    assert paid.entry_price_effective == pytest.approx(11.01)
+    assert paid.entry_price_effective == pytest.approx(11.02)
     assert paid.exit_price_effective == pytest.approx(8.99)
     assert gapped[0].entry_price == 12
     assert gapped[0].exit_price == 9
@@ -285,7 +327,7 @@ def test_a_later_bar_stops_at_the_other_extreme():
         _bar(DAY, 10, 6, 8, 8, 8, 8),
         _bar(DAY, 16, 54, 12, 12, 12, 12),
     ], instrument=PETR4)
-    assert touched[0].entry_price == 11
+    assert touched[0].entry_price == pytest.approx(11.01)
     assert touched[0].exit_price == 9
     assert touched[0].exit_time.minute == 7
     assert gapped[0].exit_price == 8
@@ -301,7 +343,7 @@ def test_stop_core_and_orb_confirm_fill_different_prices():
     ]
     stop, stop_warnings, _ = _generate(rows, instrument=PETR4)
     confirm, confirm_warnings, _ = _generate(rows, {"execution": "confirm"}, instrument=PETR4)
-    assert stop[0].entry_price == 11
+    assert stop[0].entry_price == pytest.approx(11.01)
     assert stop[0].entry_time.minute == 5
     assert confirm[0].entry_price == 11.4
     assert confirm[0].entry_time.minute == 6
@@ -317,12 +359,13 @@ def test_tickercsv_uses_the_first_real_print_not_the_edge():
     ]
     trades = pd.DataFrame({
         "timestamp": [
+            pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 5, 0, tzinfo=TZ)),
             pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 5, 1, tzinfo=TZ)),
             pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 10, 5, 40, tzinfo=TZ)),
             pd.Timestamp(datetime(DAY.year, DAY.month, DAY.day, 16, 54, 10, tzinfo=TZ)),
         ],
-        "price": [11.4, 8.7, 12.0],
-        "contract": ["PETR4", "PETR4", "PETR4"],
+        "price": [11.0, 11.4, 8.7, 12.0],
+        "contract": ["PETR4", "PETR4", "PETR4", "PETR4"],
     })
     raw, warnings, skipped = OpeningRangeBreakoutStrategy().generate(
         _frame(rows),
