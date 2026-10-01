@@ -6,7 +6,7 @@ from datetime import date
 from engine.costs import CostModel, apply_costs
 from engine.instruments import InstrumentSpec
 from engine.metrics import performance
-from engine.models import BacktestResult, RawTrade, SegmentResult, SkippedSession, Trade
+from engine.models import BacktestResult, RawTrade, SegmentResult, Trade
 from engine.strategies.base import Strategy
 from engine.walkforward import WalkForwardConfig, run_walk_forward
 
@@ -73,8 +73,7 @@ def run_backtest(
         raise ValueError("Timeframe inválido.")
 
     sessions = sorted(set(bars["timestamp"].dt.date))
-    raw, warnings = strategy.generate(bars, params, instrument, bar_minutes)
-    skipped = _skipped_sessions(warnings)
+    raw, warnings, skipped = strategy.generate(bars, params, instrument, bar_minutes)
     trades = execute(raw, instrument, costs, symbol)
     metrics, equity = performance(trades, sessions, initial_capital, tax_rate, n_trials)
 
@@ -122,25 +121,6 @@ def run_backtest(
         session_dates=sessions,
         skipped=skipped,
     )
-
-
-def _skipped_sessions(warnings: list[str]) -> list[SkippedSession]:
-    marker = ": pregão pulado. "
-    found: list[SkippedSession] = []
-    seen: set[date] = set()
-    for warning in warnings:
-        if marker not in warning:
-            continue
-        day_text, reason = warning.split(marker, 1)
-        try:
-            day = date.fromisoformat(day_text.strip())
-        except ValueError:
-            continue
-        if day in seen:
-            continue
-        seen.add(day)
-        found.append(SkippedSession(session_date=day, reason=reason.strip()))
-    return found
 
 
 def _unique(items: list[str]) -> list[str]:

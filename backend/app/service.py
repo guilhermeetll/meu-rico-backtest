@@ -220,7 +220,7 @@ def _serialize(payload: BacktestInput, instrument, costs: CostModel, result: Bac
             "naquele dia. O fechamento de outro contrato não entra no sinal. Se um sinal "
             "precisar do fechamento anterior, usa o do mesmo vencimento ou o pregão é pulado."
         )
-    text = _summary(result.metrics, payload.symbol)
+    text = _summary(result.metrics, payload.symbol, result.skipped)
     return {
         "strategy": payload.strategy,
         "symbol": payload.symbol.upper(),
@@ -235,7 +235,11 @@ def _serialize(payload: BacktestInput, instrument, costs: CostModel, result: Bac
         "trades": [_trade(trade) for trade in result.trades],
         "warnings": _unique(warnings),
         "skipped": [
-            {"date": item.session_date.isoformat(), "reason": item.reason}
+            {
+                "date": item.session_date.isoformat(),
+                "window": item.window,
+                "reason": item.reason,
+            }
             for item in result.skipped
         ],
         "notes": notes,
@@ -260,13 +264,23 @@ def _serialize(payload: BacktestInput, instrument, costs: CostModel, result: Bac
     }
 
 
-def _summary(metrics: Metrics, symbol: str) -> str:
+def _summary(metrics: Metrics, symbol: str, skipped) -> str:
     net = _brl(metrics.net_pnl_after_tax)
     sharpe = "indefinido" if metrics.sharpe is None else f"{metrics.sharpe:.2f}".replace(".", ",")
-    return (
+    text = (
         f"{metrics.n_sessions} pregões, {metrics.n_trades} operações em {symbol.upper()}. "
         f"Resultado líquido de IR {net}. Sharpe {sharpe}."
     )
+    trade_days = {item.session_date for item in skipped if item.window == "trade"}
+    if trade_days:
+        count = len(trade_days)
+        label = "pregão pulado" if count == 1 else "pregões pulados"
+        text += (
+            f" {count} {label} por janela de operação incompleta. "
+            "Ao vivo a posição já estaria aberta, então um dia de estresse, "
+            "como um circuit breaker, fica de fora deste resultado."
+        )
+    return text
 
 
 def _metrics(metrics: Metrics) -> dict:

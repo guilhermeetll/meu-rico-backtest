@@ -187,7 +187,9 @@ A janela da operação também tem duas opções (`trade_window`):
 
 Não há posição overnight. Um timeframe mais grosso que a janela não olha o miolo de uma barra ainda aberta: o pregão é pulado.
 
-Barra faltando também pula o pregão, em vez de calcular o sinal com o que sobrou. Cada janela — a do sinal e a da operação — precisa da barra de início, da barra que fecha exatamente no fim da janela e de uma cobertura mínima. A barra de início pode atrasar `edge_tolerance_minutes` (padrão 5): o primeiro negócio do WIN costuma sair às 09:02 ou 09:03, e esses minutos iniciais contam como cobertos. Uma primeira barra às 11:00, 12:00, 13:00 ou 15:00 fica fora dessa tolerância. A cobertura padrão é 90% (`min_bar_coverage`); zero desliga só a fração e mantém as duas pontas. O motivo entra em `skipped` na resposta da API e na lista «Dias pulados» da tela. Os avisos desses pregões não são cortados no limite de 30.
+Barra faltando também pula o pregão, em vez de calcular o sinal com o que sobrou. Cada janela — a do sinal e a da operação — precisa da barra de início, da barra que fecha exatamente no fim da janela e de uma cobertura mínima. A barra de início pode atrasar `edge_tolerance_minutes` (padrão 5): o primeiro negócio do WIN costuma sair às 09:02 ou 09:03, e esses minutos iniciais contam como cobertos. Uma primeira barra às 11:00, 12:00, 13:00 ou 15:00 fica fora dessa tolerância. A cobertura padrão é 90% (`min_bar_coverage`); zero desliga só a fração e mantém as duas pontas. O motivo entra em `skipped` na resposta da API e na lista «Dias pulados» da tela, com o campo `window`: `signal` para a janela do sinal e `trade` para a janela da operação. Os avisos desses pregões não são cortados no limite de 30.
+
+Pular o dia porque a janela da operação está incompleta só acontece no backtest. Ao vivo o sinal da manhã já teria aberto a posição; se o pregão para no meio da tarde, por exemplo num circuit breaker, essa operação de estresse continua aberta. No backtest o dia some e o resultado fica mais limpo do que teria sido ao vivo. Quando há pregões assim, o resumo conta quantos foram pulados por janela de operação incompleta.
 
 ## Métricas
 

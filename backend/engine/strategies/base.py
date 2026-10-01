@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from engine.instruments import InstrumentSpec
-from engine.models import RawTrade
+from engine.models import RawTrade, SkippedSession
 
 
 @dataclass(frozen=True)
@@ -43,5 +43,5 @@ class Strategy(ABC):
         params: dict,
         instrument: InstrumentSpec,
         bar_minutes: int,
-    ) -> tuple[list[RawTrade], list[str]]:
+    ) -> tuple[list[RawTrade], list[str], list[SkippedSession]]:
         raise NotImplementedError
