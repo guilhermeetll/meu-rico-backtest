@@ -53,10 +53,35 @@ function when(iso: string | null): string {
 }
 
 function variantLabel(params: Record<string, unknown>): string {
+  if (params.exit !== undefined && params.signal_anchor === undefined) {
+    const exit = String(params.exit);
+    return exit === "eod" ? "Gap · saída fim do dia" : `Gap · saída ${exit} min`;
+  }
+  if (params.range_minutes !== undefined && params.signal_anchor === undefined) {
+    return `ORB · ${params.range_minutes} min`;
+  }
   const anchor = params.signal_anchor === "prior_close" ? "Fechamento anterior" : "Abertura do pregão";
   const end = params.signal_end === "cash_open" ? "Fim na abertura do à vista" : "Fim na abertura do WIN";
   const windowName = params.trade_window === "before_cash_auction" ? "Antes do leilão do à vista" : "Até o fechamento do WIN";
   return `${anchor} · ${end} · ${windowName}`;
+}
+
+function gridVariants(strategy: string): Record<string, unknown>[] {
+  if (strategy === "gap_reversal") {
+    return [{ exit: "15" }, { exit: "30" }, { exit: "eod" }];
+  }
+  if (strategy === "opening_range_breakout") {
+    return [{ range_minutes: 5 }, { range_minutes: 15 }, { range_minutes: 30 }];
+  }
+  return ["session_open", "prior_close"].flatMap((signal_anchor) =>
+    ["session_open", "cash_open"].flatMap((signal_end) =>
+      ["session_close", "before_cash_auction"].map((trade_window) => ({
+        signal_anchor,
+        signal_end,
+        trade_window,
+      })),
+    ),
+  );
 }
 
 function MetricCards({ metrics }: { metrics: Metrics }) {
@@ -120,6 +145,9 @@ export function App() {
   const [useExample, setUseExample] = useState(true);
   const [file, setFile] = useState<File | null>(null);
   const [columnMap, setColumnMap] = useState("");
+  const [strategy, setStrategy] = useState("intraday_momentum");
+  const [gapExit, setGapExit] = useState("eod");
+  const [rangeMinutes, setRangeMinutes] = useState(5);
   const [signalMinutes, setSignalMinutes] = useState(30);
   const [signalAnchor, setSignalAnchor] = useState("session_open");
   const [signalEnd, setSignalEnd] = useState("session_open");
@@ -213,7 +241,7 @@ export function App() {
       .filter(Boolean)
       .map(Number);
     return {
-      strategy: "intraday_momentum",
+      strategy,
       symbol,
       data_source: dataSource,
       timeframe,
@@ -221,20 +249,7 @@ export function App() {
       end,
       csv_source: csvSource,
       column_map: parsedMap,
-      strategy_params: {
-        signal_minutes: signalMinutes,
-        signal_anchor: signalAnchor,
-        signal_end: signalEnd,
-        trade_minutes: tradeMinutes,
-        trade_window: tradeWindow,
-        threshold,
-        quantity,
-        session_open: sessionOpen,
-        session_close: sessionClose,
-        skip_ash_wednesday: skipAshWednesday,
-        min_bar_coverage: minBarCoverage,
-        edge_tolerance_minutes: edgeTolerance,
-      },
+      strategy_params: strategyParams(),
       costs: { fee_per_side: fee, slippage_ticks: slippage, fee_rate: feePercent / 100 },
       tax_rate: tax / 100,
       initial_capital: capital,
@@ -254,6 +269,32 @@ export function App() {
         optimize_metric: metric,
         param_grid: gridValues.length ? { threshold: gridValues } : null,
       },
+    };
+  }
+
+  function strategyParams(): Record<string, unknown> {
+    const coverage = {
+      quantity,
+      min_bar_coverage: minBarCoverage,
+      edge_tolerance_minutes: edgeTolerance,
+    };
+    if (strategy === "gap_reversal") {
+      return { exit: gapExit, ...coverage };
+    }
+    if (strategy === "opening_range_breakout") {
+      return { range_minutes: rangeMinutes, ...coverage };
+    }
+    return {
+      signal_minutes: signalMinutes,
+      signal_anchor: signalAnchor,
+      signal_end: signalEnd,
+      trade_minutes: tradeMinutes,
+      trade_window: tradeWindow,
+      threshold,
+      session_open: sessionOpen,
+      session_close: sessionClose,
+      skip_ash_wednesday: skipAshWednesday,
+      ...coverage,
     };
   }
 
@@ -279,18 +320,7 @@ export function App() {
       const payload = await buildRequest();
       setStudy(await runStudy({
         ...payload,
-        variants: [
-          "session_open",
-          "prior_close",
-        ].flatMap((signal_anchor) =>
-          ["session_open", "cash_open"].flatMap((signal_end) =>
-            ["session_close", "before_cash_auction"].map((trade_window) => ({
-              signal_anchor,
-              signal_end,
-              trade_window,
-            })),
-          ),
-        ),
+        variants: gridVariants(strategy),
       }));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Não foi possível comparar as variantes.");
@@ -314,8 +344,8 @@ export function App() {
         <div>
           <h1 className="brand">Meu Rico <span>Backtest</span></h1>
           <p className="lede">
-            Simulação de day trade na B3. A primeira estratégia é o momentum intraday do WIN:
-            o sinal da manhã define a direção e a operação acontece no fim do pregão ou antes do leilão do à vista.
+            Simulação de day trade na B3. As estratégias pré-registradas são o momentum
+            intraday, a reversão do gap de abertura e o rompimento da faixa de abertura.
           </p>
         </div>
         <div className="badge">Nenhuma ordem é enviada</div>
@@ -396,6 +426,54 @@ export function App() {
           <fieldset>
             <legend>Estratégia</legend>
             <label>
+              Estratégia
+              <select value={strategy} onChange={(event) => setStrategy(event.target.value)}>
+                <option value="intraday_momentum">Momentum intraday</option>
+                <option value="gap_reversal">Reversão do gap de abertura</option>
+                <option value="opening_range_breakout">Rompimento da faixa de abertura</option>
+              </select>
+            </label>
+            {strategy === "gap_reversal" && (
+              <>
+                <label>
+                  Saída
+                  <select value={gapExit} onChange={(event) => setGapExit(event.target.value)}>
+                    <option value="15">15 minutos</option>
+                    <option value="30">30 minutos</option>
+                    <option value="eod">Fim do dia</option>
+                  </select>
+                </label>
+                <p className="hint">
+                  Gap = ln(abertura / fechamento anterior). O limiar é fixo: 0,5% no WIN e no índice, 1% nas ações. A entrada é a abertura da primeira barra depois do leilão, e a grade pré-registrada cruza as três saídas.
+                </p>
+                <label>
+                  Quantidade
+                  <input type="number" min={1} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} />
+                </label>
+              </>
+            )}
+            {strategy === "opening_range_breakout" && (
+              <>
+                <label>
+                  Faixa
+                  <select value={rangeMinutes} onChange={(event) => setRangeMinutes(Number(event.target.value))}>
+                    <option value={5}>5 minutos</option>
+                    <option value={15}>15 minutos</option>
+                    <option value={30}>30 minutos</option>
+                  </select>
+                </label>
+                <p className="hint">
+                  A máxima e a mínima dos primeiros minutos definem a faixa. O primeiro fechamento fora dela entra na barra seguinte, com stop no outro extremo e saída no fim do dia. No máximo uma operação por pregão.
+                </p>
+                <label>
+                  Quantidade
+                  <input type="number" min={1} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} />
+                </label>
+              </>
+            )}
+            {strategy === "intraday_momentum" && (
+            <>
+            <label>
               Referência do sinal
               <select value={signalAnchor} onChange={(event) => setSignalAnchor(event.target.value)}>
                 <option value="session_open">Abertura do pregão até o fim da primeira janela</option>
@@ -463,6 +541,13 @@ export function App() {
             <p className="hint">
               Nesses dias o à vista e o WIN abrem às 13:00 e o leilão do à vista é 17:55–18:00. O padrão é não operar. Se desmarcar, os dois fins de sinal usam essa abertura e a janela antes do leilão passa a ser 17:25–17:55.
             </p>
+            {tradeWindow === "before_cash_auction" ? (
+              <p className="hint">A meia hora termina quando começa o leilão do à vista. De outubro/2023 a setembro/2026, inclusive no inverno, isso é 16:25–16:55. Na Quarta-feira de Cinzas o leilão começa às 17:55, se o dia não for pulado.</p>
+            ) : (
+              <p className="hint">A entrada é no início dos últimos minutos e a saída é no fechamento informado, ou no horário automático do ativo.</p>
+            )}
+            </>
+            )}
             <div className="grid-2">
               <label>
                 Cobertura mínima
@@ -490,11 +575,6 @@ export function App() {
             <p className="hint">
               Cada janela precisa da barra de início, com essa tolerância, e da barra que fecha no fim. A fração é a cobertura mínima; zero desliga só a fração. Pregão incompleto é pulado e o motivo aparece no resultado.
             </p>
-            {tradeWindow === "before_cash_auction" ? (
-              <p className="hint">A meia hora termina quando começa o leilão do à vista. De outubro/2023 a setembro/2026, inclusive no inverno, isso é 16:25–16:55. Na Quarta-feira de Cinzas o leilão começa às 17:55, se o dia não for pulado.</p>
-            ) : (
-              <p className="hint">A entrada é no início dos últimos minutos e a saída é no fechamento informado, ou no horário automático do ativo.</p>
-            )}
           </fieldset>
           <fieldset>
             <legend>Custos, slippage e IR</legend>
@@ -528,6 +608,9 @@ export function App() {
               Configurações testadas (N do Sharpe deflacionado)
               <input type="number" min={1} value={nTrials} onChange={(event) => setNTrials(Number(event.target.value))} />
             </label>
+            <p className="hint">
+              O estudo usa pelo menos o número de variantes da grade. Um N maior é o total acumulado de configurações do projeto.
+            </p>
           </fieldset>
           <fieldset>
             <legend>Amostra</legend>
@@ -590,10 +673,10 @@ export function App() {
             {running ? "Rodando backtest…" : "Rodar backtest"}
           </button>
           <button className="secondary" type="button" onClick={() => void onCompare()} disabled={running || comparing}>
-            {comparing ? "Comparando variantes…" : "Comparar sinal e janela"}
+            {comparing ? "Comparando variantes…" : strategy === "intraday_momentum" ? "Comparar sinal e janela" : "Rodar a grade pré-registrada"}
           </button>
           <p className="hint">
-            WIN: R$ 0,50 por contrato por lado e 1 tick (5 pontos = R$ 1,00). Ação: 0,023% por lado sobre o valor negociado e 1 tick de R$ 0,01. A comparação cruza referência, fim do sinal e janela (oito variantes) e o Sharpe deflacionado de cada uma usa esse total.
+            WIN: R$ 0,50 por contrato por lado e 1 tick (5 pontos = R$ 1,00). Ação: 0,023% por lado sobre o valor negociado e 1 tick de R$ 0,01. A grade do momentum tem oito variantes. Gap e ORB têm três cada. O Sharpe deflacionado de cada linha usa pelo menos esse total.
           </p>
         </form>
         <section className="panel">
@@ -725,7 +808,7 @@ export function App() {
         <section className="panel history">
           <h2>Estudo · {study.n_variants} variantes</h2>
           <p className="hint">
-            Sharpe deflacionado de cada linha usa N = {study.n_trials}, o total de configurações deste estudo.
+            Sharpe deflacionado de cada linha usa N = {study.n_trials}. Se o formulário pedir um N maior que a grade, esse é o acumulado do projeto.
           </p>
           <div className="scroll">
             <table>

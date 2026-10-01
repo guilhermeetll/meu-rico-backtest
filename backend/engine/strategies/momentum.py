@@ -1,34 +1,24 @@
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
-
-import pandas as pd
+from datetime import timedelta
 
 from engine.instruments import InstrumentSpec
 from engine.models import RawTrade, SkippedSession
 from engine.series import contracts_of, return_versus_prior_close
 from engine.sessions import cash_auction_window, cash_session, is_ash_wednesday, session_bounds
 from engine.strategies.base import ParamField, Strategy
+from engine.strategies.common import (
+    at as _at,
+    clock as _clock,
+    contract_of as _contract_of,
+    incomplete_window as _incomplete_window,
+    span as _span,
+    unique as _unique,
+)
 
 SIGNAL_ANCHORS = ("session_open", "prior_close")
 SIGNAL_ENDS = ("session_open", "cash_open")
 TRADE_WINDOWS = ("session_close", "before_cash_auction")
-
-
-def _clock(value: str) -> time:
-    try:
-        hour, minute = value.strip().split(":")
-        parsed = time(int(hour), int(minute))
-    except (ValueError, AttributeError) as exc:
-        raise ValueError("Horário deve estar no formato HH:MM ou auto.") from exc
-    return parsed
-
-
-def _at(day, clock: time, tz) -> pd.Timestamp:
-    stamp = pd.Timestamp(datetime.combine(day, clock))
-    if tz is None:
-        return stamp
-    return stamp.tz_localize(tz)
 
 
 class IntradayMomentumStrategy(Strategy):
@@ -310,110 +300,6 @@ class IntradayMomentumStrategy(Strategy):
         return trades, _unique(warnings), skipped
 
 
-def _span(start: pd.Timestamp, end: pd.Timestamp) -> str:
-    return f"{_hhmm(start)}–{_hhmm(end)}"
-
-
-def _hhmm(stamp) -> str:
-    ts = pd.Timestamp(stamp)
-    return f"{int(ts.hour):02d}:{int(ts.minute):02d}"
-
-
-def _minute_key(stamp) -> tuple[int, int, int, int, int]:
-    ts = pd.Timestamp(stamp)
-    return (int(ts.year), int(ts.month), int(ts.day), int(ts.hour), int(ts.minute))
-
-
-def _pct(value: float) -> str:
-    scaled = value * 100
-    if abs(scaled - round(scaled)) < 1e-9:
-        return f"{int(round(scaled))}%"
-    return f"{scaled:.1f}%".replace(".", ",")
-
-
-def _incomplete_window(
-    timestamps: pd.Series,
-    window_start: pd.Timestamp,
-    window_end: pd.Timestamp,
-    bar_delta: timedelta,
-    edge: timedelta,
-    min_coverage: float,
-    bar_minutes: int,
-    edge_minutes: int,
-) -> str | None:
-    """Reason the window cannot be used, or None when it passes.
-
-    The start bar may land up to `edge` after the window opens. The end bar
-    is the one that closes exactly at `window_end`. Leading minutes before
-    an accepted start bar count as covered. Any later hole counts.
-    `min_coverage` of 0 keeps the two endpoints and skips the fraction.
-    """
-    label_start = _hhmm(window_start)
-    span = window_end - window_start
-    if span <= timedelta(0) or span % bar_delta != timedelta(0):
-        return (
-            f"o timeframe de {bar_minutes} minutos não cabe inteiro "
-            f"na janela {label_start}–{_hhmm(window_end)}"
-        )
-    n_slots = span // bar_delta
-    expected = [_minute_key(window_start + bar_delta * i) for i in range(n_slots)]
-    end_key = expected[-1]
-    present = {_minute_key(ts) for ts in timestamps}
-    start_limit = _minute_key(window_start + edge)
-    start_key = _minute_key(window_start)
-    window_end_key = _minute_key(window_end)
-    in_window = [key for key in present if start_key <= key < window_end_key]
-    start_hits = [key for key in in_window if key <= start_limit]
-    has_start = bool(start_hits)
-    has_end = end_key in present
-    if has_start:
-        first = min(start_hits)
-        excused = {key for key in expected if key < first}
-    else:
-        excused = set()
-    covered = len(set(expected) & present | excused)
-    ratio = covered / n_slots
-    problems: list[str] = []
-    if not has_start:
-        if in_window:
-            problems.append(
-                f"sem a barra de início (primeira barra da janela às {_hhmm_key(min(in_window))}, "
-                f"fora da tolerância de {edge_minutes} minutos a partir de {label_start})"
-            )
-        else:
-            later = [key for key in present if key >= window_end_key]
-            earlier = [key for key in present if key < start_key]
-            if later and not earlier:
-                problems.append(
-                    f"sem a barra de início (primeira barra do pregão às {_hhmm_key(min(present))})"
-                )
-            elif earlier and not later:
-                problems.append(f"sem a barra de início (última barra às {_hhmm_key(max(present))})")
-            else:
-                problems.append(
-                    f"sem a barra de início (tolerância de {edge_minutes} minutos a partir de {label_start})"
-                )
-    if not has_end:
-        before_end = [key for key in present if key < window_end_key]
-        if before_end:
-            problems.append(
-                f"sem a barra de fim {_hhmm_key(end_key)} (última barra às {_hhmm_key(max(before_end))})"
-            )
-        else:
-            problems.append(f"sem a barra de fim {_hhmm_key(end_key)}")
-    if min_coverage > 0 and ratio + 1e-9 < min_coverage:
-        problems.append(
-            f"cobertura {covered}/{n_slots} ({_pct(ratio)}), abaixo de {_pct(min_coverage)}"
-        )
-    if not problems:
-        return None
-    return "; ".join(problems)
-
-
-def _hhmm_key(key: tuple[int, int, int, int, int]) -> str:
-    return f"{key[3]:02d}:{key[4]:02d}"
-
-
 def _as_bool(value) -> bool:
     if isinstance(value, bool):
         return value
@@ -426,22 +312,3 @@ def _as_bool(value) -> bool:
         return False
     raise ValueError("Pular a Quarta-feira de Cinzas deve ser verdadeiro ou falso.")
 
-
-def _contract_of(day_bars) -> str | None:
-    if "contract" not in day_bars.columns:
-        return None
-    value = day_bars["contract"].iloc[0]
-    if pd.isna(value):
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _unique(items: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            out.append(item)
-    return out
