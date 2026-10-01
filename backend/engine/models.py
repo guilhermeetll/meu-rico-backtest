@@ -96,8 +96,15 @@ class WalkForwardResult:
 
 @dataclass(frozen=True)
 class SkippedSession:
+    """A session dropped because one window did not have enough bars.
+
+    `window` is `signal` or `trade`. A missing trade window can be skipped
+    only in a backtest: live, the position would already be open.
+    """
+
     session_date: date
     reason: str
+    window: str
 
 
 @dataclass

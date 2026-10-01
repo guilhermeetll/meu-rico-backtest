@@ -108,3 +108,49 @@ def test_study_counts_variants_as_deflated_sharpe_trials(tmp_path: Path, monkeyp
         assert equity["tick_size"] == 0.01
         assert equity["default_fee_rate"] == 0.00023
         assert equity["default_slippage_ticks"] == 1
+
+
+def test_skipped_window_reaches_the_api_and_the_summary(tmp_path: Path, monkeypatch):
+    lines = ["datetime,open,high,low,close,volume"]
+
+    def add(day: str, start: int, end: int) -> None:
+        for minute in range(start, end + 1):
+            hour, mm = divmod(minute, 60)
+            price = 100_000 + minute
+            lines.append(f"{day} {hour:02d}:{mm:02d}:00,{price},{price},{price},{price},1")
+
+    add("2026-01-30", 9 * 60, 12 * 60)
+    add("2026-02-02", 15 * 60, 18 * 60 + 24)
+    csv_path = tmp_path / "buracos.csv"
+    csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path}/backtests.db")
+    monkeypatch.setenv("SAMPLE_DATA_PATH", str(csv_path))
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("B3_DATA_ROOT", str(tmp_path / "b3_ticks"))
+    with TestClient(create_app()) as client:
+        created = client.post(
+            "/api/backtests",
+            json={
+                "strategy": "intraday_momentum",
+                "symbol": "WIN",
+                "data_source": "csv",
+                "timeframe": "1min",
+                "start": "2026-01-30",
+                "end": "2026-02-02",
+                "csv_source": "example",
+                "strategy_params": {"threshold": 0},
+                "costs": {"fee_per_side": 0.5, "slippage_ticks": 1},
+                "tax_rate": 0.2,
+                "initial_capital": 10000,
+                "n_trials": 1,
+            },
+        )
+        assert created.status_code == 200, created.text
+        body = created.json()
+        by_day = {item["date"]: item for item in body["skipped"]}
+        assert by_day["2026-01-30"]["window"] == "trade"
+        assert "12:00" in by_day["2026-01-30"]["reason"]
+        assert by_day["2026-02-02"]["window"] == "signal"
+        assert "15:00" in by_day["2026-02-02"]["reason"]
+        assert "1 pregão pulado por janela de operação incompleta" in body["summary"]
+        assert "circuit breaker" in body["summary"]

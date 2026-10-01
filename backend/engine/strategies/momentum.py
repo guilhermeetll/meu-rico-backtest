@@ -5,7 +5,7 @@ from datetime import datetime, time, timedelta
 import pandas as pd
 
 from engine.instruments import InstrumentSpec
-from engine.models import RawTrade
+from engine.models import RawTrade, SkippedSession
 from engine.series import contracts_of, return_versus_prior_close
 from engine.sessions import cash_auction_window, cash_session, is_ash_wednesday, session_bounds
 from engine.strategies.base import ParamField, Strategy
@@ -166,6 +166,7 @@ class IntradayMomentumStrategy(Strategy):
         bar_delta = timedelta(minutes=bar_minutes)
         edge = timedelta(minutes=edge_minutes)
         warnings: list[str] = []
+        skipped: list[SkippedSession] = []
         trades: list[RawTrade] = []
 
         frame = bars.sort_values("timestamp")
@@ -225,6 +226,18 @@ class IntradayMomentumStrategy(Strategy):
                 gaps.append(f"Janela da operação {_span(trade_start, trade_end)}: {trade_gap}")
             if gaps:
                 warnings.append(f"{day.isoformat()}: pregão pulado. {'. '.join(gaps)}.")
+                if signal_gap:
+                    skipped.append(SkippedSession(
+                        session_date=day,
+                        window="signal",
+                        reason=f"Janela do sinal {_span(signal_window_start, signal_end)}: {signal_gap}.",
+                    ))
+                if trade_gap:
+                    skipped.append(SkippedSession(
+                        session_date=day,
+                        window="trade",
+                        reason=f"Janela da operação {_span(trade_start, trade_end)}: {trade_gap}.",
+                    ))
                 continue
 
             covered_until = session_end if session_end > trade_end else trade_end
@@ -294,7 +307,7 @@ class IntradayMomentumStrategy(Strategy):
                     signal_return=signal_return,
                 )
             )
-        return trades, _unique(warnings)
+        return trades, _unique(warnings), skipped
 
 
 def _span(start: pd.Timestamp, end: pd.Timestamp) -> str:

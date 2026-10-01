@@ -73,7 +73,7 @@ def test_positive_morning_buys_the_last_half_hour():
 def test_negative_morning_sells():
     day = date(2026, 9, 18)
     bars = _frame(_day_bars(day, 100_000, 99_950, 100_000, 99_950))
-    raw, _ = IntradayMomentumStrategy().generate(bars, {"min_bar_coverage": 0}, WIN, 1)
+    raw, _, _ = IntradayMomentumStrategy().generate(bars, {"min_bar_coverage": 0}, WIN, 1)
     assert raw[0].direction == -1
     assert raw[0].signal_return == pytest.approx(-0.0005)
 
@@ -81,7 +81,7 @@ def test_negative_morning_sells():
 def test_threshold_filters_a_small_move():
     day = date(2026, 9, 17)
     bars = _frame(_day_bars(day, 100_000, 100_050, 100_100, 100_150))
-    raw, _ = IntradayMomentumStrategy().generate(bars, {"threshold": 0.01, "min_bar_coverage": 0}, WIN, 1)
+    raw, _, _ = IntradayMomentumStrategy().generate(bars, {"threshold": 0.01, "min_bar_coverage": 0}, WIN, 1)
     assert raw == []
 
 
@@ -89,7 +89,7 @@ def test_mixed_contracts_on_one_day_are_skipped():
     day = date(2026, 9, 30)
     rows = _day_bars(day, 180_000, 180_050, 180_100, 180_150, contract="WINV26")
     rows.extend(_day_bars(day, 100_000, 99_000, 100_100, 100_150, contract="WINZ26"))
-    raw, warnings = IntradayMomentumStrategy().generate(_frame(rows), {"min_bar_coverage": 0}, WIN, 1)
+    raw, warnings, _ = IntradayMomentumStrategy().generate(_frame(rows), {"min_bar_coverage": 0}, WIN, 1)
     assert raw == []
     assert any("mistura" in warning for warning in warnings)
 
@@ -99,7 +99,7 @@ def test_prior_close_includes_the_gap_and_skips_the_first_session():
     second = date(2026, 9, 18)
     rows = _day_bars(first, 100_000, 100_050, 100_100, 100_200, contract="WINV26")
     rows.extend(_day_bars(second, 100_000, 100_050, 100_100, 100_150, contract="WINV26"))
-    raw, warnings = IntradayMomentumStrategy().generate(
+    raw, warnings, _ = IntradayMomentumStrategy().generate(
         _frame(rows), {"signal_anchor": "prior_close", "min_bar_coverage": 0}, WIN, 1
     )
     assert len(raw) == 1
@@ -108,7 +108,7 @@ def test_prior_close_includes_the_gap_and_skips_the_first_session():
     assert raw[0].signal_return == pytest.approx(100_050 / 100_200 - 1)
     assert any("2026-09-17" in warning and "fechamento anterior" in warning for warning in warnings)
 
-    opened, _ = IntradayMomentumStrategy().generate(_frame(rows), {"signal_anchor": "session_open", "min_bar_coverage": 0}, WIN, 1)
+    opened, _, _ = IntradayMomentumStrategy().generate(_frame(rows), {"signal_anchor": "session_open", "min_bar_coverage": 0}, WIN, 1)
     assert opened[1].session_date == second
     assert opened[1].direction == 1
 
@@ -118,7 +118,7 @@ def test_prior_close_does_not_borrow_another_contract():
     second = date(2026, 9, 18)
     rows = _day_bars(first, 180_000, 180_050, 180_100, 180_200, contract="WINV26")
     rows.extend(_day_bars(second, 100_000, 100_050, 100_100, 100_150, contract="WINZ26"))
-    raw, warnings = IntradayMomentumStrategy().generate(
+    raw, warnings, _ = IntradayMomentumStrategy().generate(
         _frame(rows), {"signal_anchor": "prior_close", "min_bar_coverage": 0}, WIN, 1
     )
     assert raw == []
@@ -135,14 +135,14 @@ def test_before_cash_auction_trades_from_1625_to_1655():
         {"timestamp": _stamp(day, 17, 55), "open": 100_800, "high": 100_800, "low": 100_800, "close": 100_800, "volume": 1},
         {"timestamp": _stamp(day, 18, 24), "open": 100_900, "high": 100_900, "low": 100_900, "close": 100_900, "volume": 1},
     ]
-    raw, _ = IntradayMomentumStrategy().generate(_frame(rows), {"trade_window": "before_cash_auction", "min_bar_coverage": 0}, WIN, 1)
+    raw, _, _ = IntradayMomentumStrategy().generate(_frame(rows), {"trade_window": "before_cash_auction", "min_bar_coverage": 0}, WIN, 1)
     assert len(raw) == 1
     assert raw[0].entry_time.hour == 16 and raw[0].entry_time.minute == 25
     assert raw[0].entry_price == 100_200
     assert raw[0].exit_time.hour == 16 and raw[0].exit_time.minute == 55
     assert raw[0].exit_price == 100_250
 
-    default, _ = IntradayMomentumStrategy().generate(_frame(rows), {"min_bar_coverage": 0}, WIN, 1)
+    default, _, _ = IntradayMomentumStrategy().generate(_frame(rows), {"min_bar_coverage": 0}, WIN, 1)
     assert default[0].entry_time.hour == 17 and default[0].entry_time.minute == 55
     assert default[0].exit_price == 100_900
 
@@ -157,7 +157,7 @@ def test_before_cash_auction_stays_at_1625_in_recent_winters():
         {"timestamp": _stamp(day, 17, 25), "open": 100_200, "high": 100_200, "low": 100_200, "close": 100_200, "volume": 1},
         {"timestamp": _stamp(day, 17, 54), "open": 100_900, "high": 100_900, "low": 100_900, "close": 100_900, "volume": 1},
     ]
-    raw, _ = IntradayMomentumStrategy().generate(_frame(rows), {"trade_window": "before_cash_auction", "min_bar_coverage": 0}, WIN, 1)
+    raw, _, _ = IntradayMomentumStrategy().generate(_frame(rows), {"trade_window": "before_cash_auction", "min_bar_coverage": 0}, WIN, 1)
     assert len(raw) == 1
     assert raw[0].entry_time.hour == 16 and raw[0].entry_time.minute == 25
     assert raw[0].exit_time.hour == 16 and raw[0].exit_time.minute == 55
@@ -178,10 +178,10 @@ def test_cash_open_signal_end_works_for_both_anchors():
         {"timestamp": _stamp(day, 17, 55), "open": 101_100, "high": 101_100, "low": 101_100, "close": 101_100, "volume": 1, "contract": "WINV26"},
         {"timestamp": _stamp(day, 18, 24), "open": 101_200, "high": 101_200, "low": 101_200, "close": 101_200, "volume": 1, "contract": "WINV26"},
     ]
-    early, _ = IntradayMomentumStrategy().generate(
+    early, _, _ = IntradayMomentumStrategy().generate(
         _frame(rows), {"signal_anchor": "session_open", "signal_end": "session_open", "min_bar_coverage": 0}, WIN, 1
     )
-    late, _ = IntradayMomentumStrategy().generate(
+    late, _, _ = IntradayMomentumStrategy().generate(
         _frame(rows), {"signal_anchor": "session_open", "signal_end": "cash_open", "min_bar_coverage": 0}, WIN, 1
     )
     early_day = [trade for trade in early if trade.session_date == day]
@@ -191,10 +191,10 @@ def test_cash_open_signal_end_works_for_both_anchors():
     assert len(late_day) == 1 and late_day[0].direction == 1
     assert late_day[0].signal_return == pytest.approx(101_000 / 100_000 - 1)
 
-    early_gap, _ = IntradayMomentumStrategy().generate(
+    early_gap, _, _ = IntradayMomentumStrategy().generate(
         _frame(rows), {"signal_anchor": "prior_close", "signal_end": "session_open", "min_bar_coverage": 0}, WIN, 1
     )
-    late_gap, _ = IntradayMomentumStrategy().generate(
+    late_gap, _, _ = IntradayMomentumStrategy().generate(
         _frame(rows), {"signal_anchor": "prior_close", "signal_end": "cash_open", "min_bar_coverage": 0}, WIN, 1
     )
     assert len(early_gap) == 1 and early_gap[0].session_date == day
@@ -214,7 +214,7 @@ def test_cash_open_signal_followed_the_11h_open_in_early_2012():
         {"timestamp": _stamp(day, 17, 25), "open": 102_100, "high": 102_100, "low": 102_100, "close": 102_100, "volume": 1},
         {"timestamp": _stamp(day, 17, 54), "open": 102_200, "high": 102_200, "low": 102_200, "close": 102_300, "volume": 1},
     ]
-    raw, _ = IntradayMomentumStrategy().generate(
+    raw, _, _ = IntradayMomentumStrategy().generate(
         _frame(rows),
         {"signal_end": "cash_open", "trade_window": "before_cash_auction", "min_bar_coverage": 0},
         WIN,
@@ -243,7 +243,7 @@ def _ash_rows(day: date) -> list[dict]:
 
 def test_ash_wednesday_is_skipped_by_default_and_tradable_from_the_real_open():
     for day in (date(2016, 2, 10), date(2024, 2, 14), date(2025, 3, 5), date(2026, 2, 18)):
-        skipped, warnings = IntradayMomentumStrategy().generate(
+        skipped, warnings, _ = IntradayMomentumStrategy().generate(
             _frame(_ash_rows(day)),
             {"signal_end": "cash_open", "trade_window": "before_cash_auction", "min_bar_coverage": 0},
             WIN,
@@ -252,7 +252,7 @@ def test_ash_wednesday_is_skipped_by_default_and_tradable_from_the_real_open():
         assert skipped == []
         assert any(day.isoformat() in warning and "Cinzas" in warning for warning in warnings)
 
-        cash, _ = IntradayMomentumStrategy().generate(
+        cash, _, _ = IntradayMomentumStrategy().generate(
             _frame(_ash_rows(day)),
             {
                 "signal_end": "cash_open",
@@ -269,7 +269,7 @@ def test_ash_wednesday_is_skipped_by_default_and_tradable_from_the_real_open():
         assert cash[0].exit_time.hour == 17 and cash[0].exit_time.minute == 55
         assert cash[0].entry_price == 104_000
 
-        opened, _ = IntradayMomentumStrategy().generate(
+        opened, _, _ = IntradayMomentumStrategy().generate(
             _frame(_ash_rows(day)),
             {"signal_anchor": "session_open", "signal_end": "session_open", "skip_ash_wednesday": False, "min_bar_coverage": 0},
             WIN,
@@ -289,7 +289,7 @@ def test_custom_session_close_still_sets_the_trade_window():
         {"timestamp": _stamp(day, 16, 59), "open": 100_320, "high": 100_320, "low": 100_320, "close": 100_340, "volume": 1},
         {"timestamp": _stamp(day, 17, 55), "open": 100_800, "high": 100_800, "low": 100_800, "close": 100_800, "volume": 1},
     ]
-    raw, _ = IntradayMomentumStrategy().generate(
+    raw, _, _ = IntradayMomentumStrategy().generate(
         _frame(rows),
         {"trade_window": "session_close", "session_close": "17:00", "trade_minutes": 20, "min_bar_coverage": 0},
         WIN,
@@ -304,7 +304,7 @@ def test_custom_session_close_still_sets_the_trade_window():
 def test_overlapping_windows_are_skipped():
     day = date(2026, 9, 17)
     bars = _frame(_day_bars(day, 100_000, 100_050, 100_100, 100_150))
-    raw, warnings = IntradayMomentumStrategy().generate(
+    raw, warnings, _ = IntradayMomentumStrategy().generate(
         bars, {"signal_minutes": 400, "trade_minutes": 400}, WIN, 1
     )
     assert raw == []
@@ -320,7 +320,7 @@ def test_expiration_uses_the_shorter_session():
         {"timestamp": _stamp(day, 17, 55), "open": 100_500, "high": 100_500, "low": 100_500, "close": 100_500, "volume": 1, "contract": "WINV26"},
         {"timestamp": _stamp(day, 17, 59), "open": 100_250, "high": 100_250, "low": 100_250, "close": 100_300, "volume": 1, "contract": "WINV26"},
     ]
-    raw, _ = IntradayMomentumStrategy().generate(_frame(rows), {"min_bar_coverage": 0}, WIN, 1)
+    raw, _, _ = IntradayMomentumStrategy().generate(_frame(rows), {"min_bar_coverage": 0}, WIN, 1)
     assert len(raw) == 1
     assert raw[0].entry_time.hour == 17 and raw[0].entry_time.minute == 30
     assert raw[0].exit_price == 100_300
@@ -414,6 +414,7 @@ def test_session_that_ends_at_noon_skips_the_trade_window():
         assert result.trades == []
         assert len(result.skipped) == 1
         assert result.skipped[0].session_date == day
+        assert result.skipped[0].window == "trade"
         assert window in result.skipped[0].reason
         assert "12:00" in result.skipped[0].reason
         assert "Janela do sinal" not in result.skipped[0].reason
@@ -421,6 +422,7 @@ def test_session_that_ends_at_noon_skips_the_trade_window():
 
     flat = _run_day(_fill(day, (9, 0), (12, 0), lambda hour, minute: 100_000))
     assert flat.trades == []
+    assert flat.skipped[0].window == "trade"
     assert "Janela da operação" in flat.skipped[0].reason
 
 
@@ -429,6 +431,7 @@ def test_session_that_starts_at_15h_does_not_reuse_that_print_as_the_open():
     result = _run_day(_fill(day, (15, 0), (18, 24), _price))
     assert result.trades == []
     assert len(result.skipped) == 1
+    assert result.skipped[0].window == "signal"
     reason = result.skipped[0].reason
     assert "Janela do sinal 09:00–09:30" in reason
     assert "15:00" in reason
@@ -446,6 +449,7 @@ def test_late_first_prints_skip_the_morning_window():
         result = _run_day(_fill(day, (hour, 0), (18, 24), _price))
         assert result.trades == [], day
         assert len(result.skipped) == 1
+        assert result.skipped[0].window == "signal"
         reason = result.skipped[0].reason
         assert result.skipped[0].session_date == day
         assert "Janela do sinal 09:00–09:30" in reason
@@ -469,6 +473,7 @@ def test_a_few_minutes_of_opening_auction_still_count():
 
     late = _run_day(_fill(day, (9, 6), (18, 24), _price))
     assert late.trades == []
+    assert late.skipped[0].window == "signal"
     assert "09:06" in late.skipped[0].reason
     assert "fora da tolerância" in late.skipped[0].reason
     allowed = _run_day(_fill(day, (9, 6), (18, 24), _price), {"edge_tolerance_minutes": 6})
@@ -484,6 +489,7 @@ def test_coverage_is_configurable_and_endpoints_stay_mandatory():
     ]
     skipped = _run_day(rows)
     assert skipped.trades == []
+    assert skipped.skipped[0].window == "signal"
     assert "cobertura" in skipped.skipped[0].reason
     assert "barra de início" not in skipped.skipped[0].reason
     assert "barra de fim" not in skipped.skipped[0].reason
@@ -496,6 +502,7 @@ def test_coverage_is_configurable_and_endpoints_stay_mandatory():
     ]
     forced = _run_day(without_close, {"min_bar_coverage": 0})
     assert forced.trades == []
+    assert forced.skipped[0].window == "signal"
     assert "barra de fim 09:29" in forced.skipped[0].reason
 
 
@@ -546,5 +553,19 @@ def test_skipped_sessions_are_kept_past_the_warning_cap():
         rows.extend(_fill(day, (9, 0), (12, 0), _price))
     result = _run_day(rows)
     assert len(result.skipped) == 40
+    assert {item.window for item in result.skipped} == {"trade"}
     assert len(result.trades) == 0
     assert sum("pregão pulado" in warning for warning in result.warnings) == 40
+
+
+def test_each_incomplete_window_is_its_own_skipped_record():
+    day = date(2026, 3, 2)
+    result = _run_day(_fill(day, (11, 0), (12, 0), _price))
+    assert result.trades == []
+    assert [item.window for item in result.skipped] == ["signal", "trade"]
+    signal, trade = result.skipped
+    assert signal.session_date == trade.session_date == day
+    assert "Janela do sinal" in signal.reason and "11:00" in signal.reason
+    assert "Janela da operação" in trade.reason and "12:00" in trade.reason
+    assert "Janela da operação" not in signal.reason
+    assert "Janela do sinal" not in trade.reason

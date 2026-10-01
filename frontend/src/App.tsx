@@ -687,11 +687,26 @@ export function App() {
               {(result.skipped ?? []).length === 0 ? (
                 <p className="empty">Nenhum pregão foi pulado por falta de barras.</p>
               ) : (
-                <ul className="warn">
-                  {(result.skipped ?? []).map((item) => (
-                    <li key={item.date}>{item.date}: {item.reason}</li>
-                  ))}
-                </ul>
+                <div className="scroll">
+                  <table className="skipped">
+                    <thead>
+                      <tr>
+                        <th>Pregão</th>
+                        <th>Janela</th>
+                        <th>Motivo</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(result.skipped ?? []).map((item) => (
+                        <tr key={`${item.date}-${item.window}`}>
+                          <td>{item.date}</td>
+                          <td>{item.window === "trade" ? "Operação" : "Sinal"}</td>
+                          <td className="reason">{item.reason}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
               {result.warnings.filter((warning) => !warning.includes("pregão pulado")).length > 0 && (
                 <ul className="warn">
