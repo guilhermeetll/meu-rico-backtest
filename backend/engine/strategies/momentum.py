@@ -101,7 +101,36 @@ class IntradayMomentumStrategy(Strategy):
                 True,
                 help=(
                     "O pregão abre às 13:00. Ligado, o dia é pulado. Desligado, o sinal "
-                    "pela abertura do WIN e o sinal pela abertura do à vista usam essa abertura."
+                    "pela abertura do WIN e o sinal pela abertura do à vista usam essa abertura. "
+                    "A janela antes do leilão, nesses dias, é 17:25–17:55."
+                ),
+            ),
+            ParamField(
+                "min_bar_coverage",
+                "Cobertura mínima das janelas",
+                "float",
+                0.9,
+                min=0,
+                max=1,
+                step=0.05,
+                help=(
+                    "Fração das barras exigida na janela do sinal e na janela da operação. "
+                    "0,9 = 90%. Zero desliga só essa fração: a barra de início e a de fim "
+                    "continuam obrigatórias. Abaixo do mínimo, o pregão é pulado."
+                ),
+            ),
+            ParamField(
+                "edge_tolerance_minutes",
+                "Tolerância da primeira barra (minutos)",
+                "int",
+                5,
+                min=0,
+                max=120,
+                help=(
+                    "A primeira barra de cada janela pode atrasar até esses minutos. "
+                    "O leilão de abertura do WIN costuma não ter negócio às 09:00; "
+                    "09:02 ou 09:03 ainda conta. Esses minutos iniciais entram na cobertura. "
+                    "Uma primeira barra às 11:00, 12:00 ou 15:00 não conta."
                 ),
             ),
         ]
@@ -128,7 +157,14 @@ class IntradayMomentumStrategy(Strategy):
         open_override = str(resolved["session_open"]).strip().lower()
         close_override = str(resolved["session_close"]).strip().lower()
         skip_ash = _as_bool(resolved["skip_ash_wednesday"])
+        min_coverage = float(resolved["min_bar_coverage"])
+        edge_minutes = int(resolved["edge_tolerance_minutes"])
+        if not 0 <= min_coverage <= 1:
+            raise ValueError("A cobertura mínima deve estar entre 0 e 1.")
+        if edge_minutes < 0:
+            raise ValueError("A tolerância da primeira barra não pode ser negativa.")
         bar_delta = timedelta(minutes=bar_minutes)
+        edge = timedelta(minutes=edge_minutes)
         warnings: list[str] = []
         trades: list[RawTrade] = []
 
@@ -170,6 +206,25 @@ class IntradayMomentumStrategy(Strategy):
                 warnings.append(
                     f"{day.isoformat()}: a janela da operação começa antes do fim do sinal. Pregão ignorado."
                 )
+                continue
+            signal_window_start = (
+                start if signal_anchor == "session_open" else signal_end - timedelta(minutes=signal_minutes)
+            )
+            gaps = []
+            signal_gap = _incomplete_window(
+                day_bars["timestamp"], signal_window_start, signal_end, bar_delta, edge,
+                min_coverage, bar_minutes, edge_minutes,
+            )
+            if signal_gap:
+                gaps.append(f"Janela do sinal {_span(signal_window_start, signal_end)}: {signal_gap}")
+            trade_gap = _incomplete_window(
+                day_bars["timestamp"], trade_start, trade_end, bar_delta, edge,
+                min_coverage, bar_minutes, edge_minutes,
+            )
+            if trade_gap:
+                gaps.append(f"Janela da operação {_span(trade_start, trade_end)}: {trade_gap}")
+            if gaps:
+                warnings.append(f"{day.isoformat()}: pregão pulado. {'. '.join(gaps)}.")
                 continue
 
             covered_until = session_end if session_end > trade_end else trade_end
@@ -240,6 +295,110 @@ class IntradayMomentumStrategy(Strategy):
                 )
             )
         return trades, _unique(warnings)
+
+
+def _span(start: pd.Timestamp, end: pd.Timestamp) -> str:
+    return f"{_hhmm(start)}–{_hhmm(end)}"
+
+
+def _hhmm(stamp) -> str:
+    ts = pd.Timestamp(stamp)
+    return f"{int(ts.hour):02d}:{int(ts.minute):02d}"
+
+
+def _minute_key(stamp) -> tuple[int, int, int, int, int]:
+    ts = pd.Timestamp(stamp)
+    return (int(ts.year), int(ts.month), int(ts.day), int(ts.hour), int(ts.minute))
+
+
+def _pct(value: float) -> str:
+    scaled = value * 100
+    if abs(scaled - round(scaled)) < 1e-9:
+        return f"{int(round(scaled))}%"
+    return f"{scaled:.1f}%".replace(".", ",")
+
+
+def _incomplete_window(
+    timestamps: pd.Series,
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+    bar_delta: timedelta,
+    edge: timedelta,
+    min_coverage: float,
+    bar_minutes: int,
+    edge_minutes: int,
+) -> str | None:
+    """Reason the window cannot be used, or None when it passes.
+
+    The start bar may land up to `edge` after the window opens. The end bar
+    is the one that closes exactly at `window_end`. Leading minutes before
+    an accepted start bar count as covered. Any later hole counts.
+    `min_coverage` of 0 keeps the two endpoints and skips the fraction.
+    """
+    label_start = _hhmm(window_start)
+    span = window_end - window_start
+    if span <= timedelta(0) or span % bar_delta != timedelta(0):
+        return (
+            f"o timeframe de {bar_minutes} minutos não cabe inteiro "
+            f"na janela {label_start}–{_hhmm(window_end)}"
+        )
+    n_slots = span // bar_delta
+    expected = [_minute_key(window_start + bar_delta * i) for i in range(n_slots)]
+    end_key = expected[-1]
+    present = {_minute_key(ts) for ts in timestamps}
+    start_limit = _minute_key(window_start + edge)
+    start_key = _minute_key(window_start)
+    window_end_key = _minute_key(window_end)
+    in_window = [key for key in present if start_key <= key < window_end_key]
+    start_hits = [key for key in in_window if key <= start_limit]
+    has_start = bool(start_hits)
+    has_end = end_key in present
+    if has_start:
+        first = min(start_hits)
+        excused = {key for key in expected if key < first}
+    else:
+        excused = set()
+    covered = len(set(expected) & present | excused)
+    ratio = covered / n_slots
+    problems: list[str] = []
+    if not has_start:
+        if in_window:
+            problems.append(
+                f"sem a barra de início (primeira barra da janela às {_hhmm_key(min(in_window))}, "
+                f"fora da tolerância de {edge_minutes} minutos a partir de {label_start})"
+            )
+        else:
+            later = [key for key in present if key >= window_end_key]
+            earlier = [key for key in present if key < start_key]
+            if later and not earlier:
+                problems.append(
+                    f"sem a barra de início (primeira barra do pregão às {_hhmm_key(min(present))})"
+                )
+            elif earlier and not later:
+                problems.append(f"sem a barra de início (última barra às {_hhmm_key(max(present))})")
+            else:
+                problems.append(
+                    f"sem a barra de início (tolerância de {edge_minutes} minutos a partir de {label_start})"
+                )
+    if not has_end:
+        before_end = [key for key in present if key < window_end_key]
+        if before_end:
+            problems.append(
+                f"sem a barra de fim {_hhmm_key(end_key)} (última barra às {_hhmm_key(max(before_end))})"
+            )
+        else:
+            problems.append(f"sem a barra de fim {_hhmm_key(end_key)}")
+    if min_coverage > 0 and ratio + 1e-9 < min_coverage:
+        problems.append(
+            f"cobertura {covered}/{n_slots} ({_pct(ratio)}), abaixo de {_pct(min_coverage)}"
+        )
+    if not problems:
+        return None
+    return "; ".join(problems)
+
+
+def _hhmm_key(key: tuple[int, int, int, int, int]) -> str:
+    return f"{key[3]:02d}:{key[4]:02d}"
 
 
 def _as_bool(value) -> bool:

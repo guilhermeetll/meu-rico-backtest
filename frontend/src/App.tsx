@@ -130,6 +130,8 @@ export function App() {
   const [sessionOpen, setSessionOpen] = useState("auto");
   const [sessionClose, setSessionClose] = useState("auto");
   const [skipAshWednesday, setSkipAshWednesday] = useState(true);
+  const [minBarCoverage, setMinBarCoverage] = useState(0.9);
+  const [edgeTolerance, setEdgeTolerance] = useState(5);
   const [fee, setFee] = useState(0.5);
   const [feePercent, setFeePercent] = useState(0);
   const [slippage, setSlippage] = useState(1);
@@ -230,6 +232,8 @@ export function App() {
         session_open: sessionOpen,
         session_close: sessionClose,
         skip_ash_wednesday: skipAshWednesday,
+        min_bar_coverage: minBarCoverage,
+        edge_tolerance_minutes: edgeTolerance,
       },
       costs: { fee_per_side: fee, slippage_ticks: slippage, fee_rate: feePercent / 100 },
       tax_rate: tax / 100,
@@ -457,7 +461,34 @@ export function App() {
               Pular Quarta-feira de Cinzas
             </label>
             <p className="hint">
-              Nesses dias o à vista e o WIN abrem às 13:00. O padrão é não operar. Se desmarcar, os dois fins de sinal usam essa abertura e terminam às 13:30.
+              Nesses dias o à vista e o WIN abrem às 13:00 e o leilão do à vista é 17:55–18:00. O padrão é não operar. Se desmarcar, os dois fins de sinal usam essa abertura e a janela antes do leilão passa a ser 17:25–17:55.
+            </p>
+            <div className="grid-2">
+              <label>
+                Cobertura mínima
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={minBarCoverage}
+                  onChange={(event) => setMinBarCoverage(Number(event.target.value))}
+                />
+              </label>
+              <label>
+                Tolerância da 1ª barra (min)
+                <input
+                  type="number"
+                  min={0}
+                  max={120}
+                  step={1}
+                  value={edgeTolerance}
+                  onChange={(event) => setEdgeTolerance(Number(event.target.value))}
+                />
+              </label>
+            </div>
+            <p className="hint">
+              Cada janela precisa da barra de início, com essa tolerância, e da barra que fecha no fim. A fração é a cobertura mínima; zero desliga só a fração. Pregão incompleto é pulado e o motivo aparece no resultado.
             </p>
             {tradeWindow === "before_cash_auction" ? (
               <p className="hint">A meia hora termina quando começa o leilão do à vista. De outubro/2023 a setembro/2026, inclusive no inverno, isso é 16:25–16:55. Na Quarta-feira de Cinzas o leilão começa às 17:55, se o dia não for pulado.</p>
@@ -652,9 +683,19 @@ export function App() {
                   </tbody>
                 </table>
               </div>
-              {result.warnings.length > 0 && (
+              <h3 className="subhead">Dias pulados</h3>
+              {(result.skipped ?? []).length === 0 ? (
+                <p className="empty">Nenhum pregão foi pulado por falta de barras.</p>
+              ) : (
                 <ul className="warn">
-                  {result.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+                  {(result.skipped ?? []).map((item) => (
+                    <li key={item.date}>{item.date}: {item.reason}</li>
+                  ))}
+                </ul>
+              )}
+              {result.warnings.filter((warning) => !warning.includes("pregão pulado")).length > 0 && (
+                <ul className="warn">
+                  {result.warnings.filter((warning) => !warning.includes("pregão pulado")).map((warning) => <li key={warning}>{warning}</li>)}
                 </ul>
               )}
               <h3 className="subhead">Premissas</h3>
@@ -680,6 +721,7 @@ export function App() {
                   <th>Líquido de IR</th>
                   <th>Sharpe</th>
                   <th>Sharpe deflacionado</th>
+                  <th>Pulados</th>
                   <th>N</th>
                 </tr>
               </thead>
@@ -691,6 +733,7 @@ export function App() {
                     <td className={moneyClass(item.metrics.net_pnl_after_tax)}>{brl.format(item.metrics.net_pnl_after_tax)}</td>
                     <td>{formatRatio(item.metrics.sharpe)}</td>
                     <td>{formatPercent(item.metrics.deflated_sharpe)}</td>
+                    <td>{(item.skipped ?? []).length}</td>
                     <td>{item.metrics.n_trials}</td>
                   </tr>
                 ))}

@@ -24,9 +24,9 @@ def test_each_variant_uses_the_study_trial_count():
         rows.extend(_day_bars(day, 100_000, 100_050, 100_100, 100_120 + index * 20))
     bars = _frame(rows)
     variants = [
-        {"signal_anchor": "session_open", "trade_window": "session_close"},
-        {"signal_anchor": "session_open", "trade_window": "before_cash_auction"},
-        {"threshold": 1.0},
+        {"signal_anchor": "session_open", "trade_window": "session_close", "min_bar_coverage": 0},
+        {"signal_anchor": "session_open", "trade_window": "before_cash_auction", "min_bar_coverage": 0},
+        {"threshold": 1.0, "min_bar_coverage": 0},
     ]
     trials, results = run_study(
         bars,
