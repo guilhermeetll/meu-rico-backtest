@@ -9,12 +9,15 @@ valor, o alerta sai como "conferir valor".
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from alertas_dividendo.strategy import JCP_WITHHOLDING, same_cash_event
+
+log = logging.getLogger(__name__)
 
 MONTHS = {
     "janeiro": 1,
@@ -568,6 +571,16 @@ def combine_same_record_date(items: list[Distribution]) -> list[Distribution]:
             grouped[item.data_com] = []
         bucket = grouped[item.data_com]
         if any(item.kind == prev.kind and same_cash_event(item.gross, prev.gross) for prev in bucket):
+            # O backtest somaria os dois. Aqui o segundo é o mesmo lançamento
+            # repetido no texto (aviso e tabela), então fica um só.
+            when = item.data_com.isoformat() if item.data_com else "sem data-com"
+            log.info(
+                "mesmo tipo e valor na data-com %s colapsados em um evento "
+                "(o backtest somaria): %s R$ %s",
+                when,
+                item.kind,
+                item.gross,
+            )
             continue
         bucket.append(item)
     combined: list[Distribution] = []

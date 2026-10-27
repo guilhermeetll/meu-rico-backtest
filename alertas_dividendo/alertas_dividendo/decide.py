@@ -38,16 +38,19 @@ class Prior:
     data_com: date | None
     kind: str
     approval: date | None = None
+    signal_id: int | None = None
 
 
 @dataclass(frozen=True)
 class Decision:
-    action: str  # comprar | conferir_valor | atualizar | ignorar
+    action: str  # comprar | conferir_valor | atualizar | corrigir_valor | ignorar
     reason: str
     yld: float | None = None
     plan: BuyPlan | None = None
     exit_date: date | None = None
     price_session: date | None = None
+    prior_gross: float | None = None
+    prior_id: int | None = None
 
 
 def _anchor(data_com: date | None, approval: date | None, published: date) -> date:
@@ -80,14 +83,28 @@ def decide(
         for prior in priors:
             if prior.kind != kind:
                 continue
-            if not same_cash_event(prior.gross, gross):
-                continue
             same_record = (
                 prior.data_com is not None and data_com is not None and prior.data_com == data_com
             )
             same_announcement = (
                 prior.approval is not None and approval is not None and prior.approval == approval
             )
+            # Retificação: mesmo papel, mesmo anúncio e mesma data-com, com
+            # outro R$/ação. Não abre segunda posição; quem chama atualiza.
+            if same_record and same_announcement and not same_cash_event(prior.gross, gross):
+                yld = yield_ratio(gross, snapshot.last_close) if snapshot.last_close else None
+                band = classify_yield(yld) if yld is not None else "sem_preco"
+                return Decision(
+                    "corrigir_valor",
+                    band if band != "ok" else "valor_corrigido",
+                    yld=yld,
+                    plan=plan,
+                    exit_date=exit_session(data_com, calendar) if data_com else None,
+                    prior_gross=prior.gross,
+                    prior_id=prior.signal_id,
+                )
+            if not same_cash_event(prior.gross, gross):
+                continue
             # Duplicata só com a mesma data-com, ou com o aviso anterior ainda
             # sem data-com e o mesmo anúncio. JCP trimestral do mesmo valor e
             # parcelas iguais com data-com diferente seguem como eventos novos.

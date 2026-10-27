@@ -789,3 +789,162 @@ def test_split_during_position_is_flagged_and_the_price_stays(tmp_path, monkeypa
         assert store.conn.execute("SELECT exit_price FROM positions").fetchone()["exit_price"] is None
     finally:
         store.close()
+
+
+def _awaiting_dividend(store: Store, gross: float, *, status: str = "aguardando_compra", entry_price=None) -> int:
+    signal_id = store.insert_signal(
+        {
+            "dedupe_key": f"aberto|{gross}",
+            "protocol": "8000",
+            "ticker": "ZZZZ3",
+            "issuer": "ZZZZ",
+            "company_name": "Empresa Teste",
+            "status": status,
+            "kind": "dividendo",
+            "gross_per_share": gross,
+            "yield": gross / 10,
+            "approval_date": "2026-10-21",
+            "data_com": "2026-10-30",
+            "buy_date": "2026-10-22",
+            "buy_deadline": "2026-10-22T16:55:00-03:00",
+            "exit_date": "2026-12-01",
+            "created_at": "2026-10-21T18:00:00-03:00",
+        }
+    )
+    store.insert_position(
+        {
+            "signal_id": signal_id,
+            "ticker": "ZZZZ3",
+            "status": status,
+            "entry_date": "2026-10-22",
+            "entry_price": entry_price,
+            "entry_source": "COTAHIST" if entry_price is not None else None,
+            "exit_date": "2026-12-01",
+            "data_com": "2026-10-30",
+            "kind": "dividendo",
+            "gross_per_share": gross,
+            "opened_at": "2026-10-21T18:00:00-03:00",
+        }
+    )
+    store.commit()
+    return signal_id
+
+
+def test_retification_updates_the_open_signal_and_sends_one_notice(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 21, 18, 30, tzinfo=TZ)
+    text = (
+        "Aprovaram dividendos de R$ 0,80 por ação. "
+        "Farão jus os detentores de ações em 30 de outubro de 2026."
+    )
+    _seed(store, "9008", text, published)
+    _awaiting_dividend(store, 0.50)
+    cfg = _cfg(tmp_path, datetime(2026, 10, 21, 19, 0, tzinfo=TZ), dry_run=False)
+    try:
+        report = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, report)
+        assert len(sent) == 1
+        assert "VALOR CORRIGIDO" in sent[0]
+        assert "COMPRA —" not in sent[0]
+        assert "0,800000" in sent[0]
+        assert "continua" in sent[0]
+        signals = store.conn.execute("SELECT gross_per_share, status, yield FROM signals").fetchall()
+        assert len(signals) == 1
+        assert abs(signals[0]["gross_per_share"] - 0.80) < 1e-9
+        assert signals[0]["status"] == "aguardando_compra"
+        assert abs(signals[0]["yield"] - 0.08) < 1e-9
+        position = store.conn.execute(
+            "SELECT status, gross_per_share FROM positions"
+        ).fetchone()
+        assert position["status"] == "aguardando_compra"
+        assert abs(position["gross_per_share"] - 0.80) < 1e-9
+        assert store.open_position_count() == 1
+        again = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, again)
+        assert sent == [sent[0]]
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"] == 1
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM positions").fetchone()["n"] == 1
+    finally:
+        store.close()
+
+
+def test_retification_below_the_floor_cancels_before_the_buy(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 21, 18, 30, tzinfo=TZ)
+    text = (
+        "Aprovaram dividendos de R$ 0,10 por ação. "
+        "Farão jus os detentores de ações em 30 de outubro de 2026."
+    )
+    _seed(store, "9009", text, published)
+    _awaiting_dividend(store, 0.50)
+    cfg = _cfg(tmp_path, datetime(2026, 10, 21, 19, 0, tzinfo=TZ), dry_run=False)
+    try:
+        report = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, report)
+        assert len(sent) == 1
+        assert "VALOR CORRIGIDO" in sent[0]
+        assert "cancelada" in sent[0]
+        assert "abaixo de 2%" in sent[0]
+        assert "COMPRA —" not in sent[0]
+        signal = store.conn.execute(
+            "SELECT status, ignore_reason, gross_per_share FROM signals"
+        ).fetchone()
+        assert signal["status"] == "ignorado"
+        assert signal["ignore_reason"] == "yield_abaixo"
+        assert abs(signal["gross_per_share"] - 0.10) < 1e-9
+        assert store.conn.execute("SELECT status FROM positions").fetchone()["status"] == "cancelada"
+        assert store.open_position_count() == 0
+        logged = [
+            row["detail"]
+            for row in store.conn.execute(
+                "SELECT detail FROM events WHERE reason='valor_corrigido'"
+            )
+        ]
+        assert logged and "compra cancelada" in logged[0]
+        again = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, again)
+        assert len(sent) == 1
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"] == 1
+    finally:
+        store.close()
+
+
+def test_retification_after_the_buy_keeps_the_open_position(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 23, 18, 0, tzinfo=TZ)
+    text = (
+        "Aprovaram dividendos de R$ 0,10 por ação. "
+        "Farão jus os detentores de ações em 30 de outubro de 2026."
+    )
+    _seed(store, "9010", text, published)
+    store.conn.execute(
+        "UPDATE documents SET reference_date='2026-10-21' WHERE protocol='9010'"
+    )
+    store.commit()
+    _awaiting_dividend(store, 0.50, status="aberta", entry_price=10.0)
+    cfg = _cfg(tmp_path, datetime(2026, 10, 23, 19, 0, tzinfo=TZ), dry_run=False)
+    try:
+        report = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, report)
+        assert len(sent) == 1
+        assert "VALOR CORRIGIDO" in sent[0]
+        assert "já está aberta" in sent[0]
+        assert "cancelada" not in sent[0]
+        signal = store.conn.execute("SELECT status, gross_per_share FROM signals").fetchone()
+        assert signal["status"] == "aberta"
+        assert abs(signal["gross_per_share"] - 0.10) < 1e-9
+        position = store.conn.execute(
+            "SELECT status, gross_per_share, entry_price FROM positions"
+        ).fetchone()
+        assert position["status"] == "aberta"
+        assert position["entry_price"] == 10.0
+        assert abs(position["gross_per_share"] - 0.10) < 1e-9
+        assert store.open_position_count() == 1
+    finally:
+        store.close()

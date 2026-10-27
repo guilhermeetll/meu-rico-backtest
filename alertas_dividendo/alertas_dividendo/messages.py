@@ -329,6 +329,62 @@ def result_message(
     return with_disclaimer(body, simulacao)
 
 
+def corrected_value_message(
+    *,
+    ticker: str,
+    old_gross: float,
+    new_gross: float,
+    yld: float | None,
+    band: str,
+    cancelled: bool,
+    already_open: bool,
+    already_closed: bool,
+    kept_waiting: bool,
+    buy_date: date | None,
+    url: str,
+    simulacao: bool,
+) -> str:
+    lines = [
+        f"VALOR CORRIGIDO — {ticker}",
+        "O valor por ação deste evento foi retificado. Não é uma compra nova.",
+        f"Valor anterior: {brl(old_gross)}",
+        f"Valor corrigido: {brl(new_gross)}",
+    ]
+    if yld is None:
+        lines.append("Yield recalculado: sem fechamento para refazer a conta.")
+    else:
+        lines.append(f"Yield recalculado: {pct(yld)}")
+    if cancelled:
+        if band == "yield_acima":
+            lines.append(
+                "O yield corrigido fica em 30% ou mais e a compra ainda não foi feita. "
+                "A ordem foi cancelada."
+            )
+        else:
+            lines.append(
+                "O yield corrigido fica abaixo de 2% e a compra ainda não foi feita. "
+                "A ordem foi cancelada."
+            )
+    elif already_closed:
+        lines.append(
+            "A posição já foi encerrada. O valor corrigido fica registrado; "
+            "o resultado que já foi avisado não é reescrito."
+        )
+    elif already_open:
+        lines.append(
+            "A posição já está aberta. Ela continua; o caixa na saída usa o valor corrigido."
+        )
+    elif kept_waiting:
+        when = f" de {day(buy_date)}" if buy_date else ""
+        lines.append(f"A compra marcada{when} continua, com o valor corrigido.")
+    else:
+        lines.append(
+            "O sinal já não estava em compra. O valor foi atualizado e nenhuma compra nova foi aberta."
+        )
+    lines.append(f"Documento: {url}")
+    return with_disclaimer("\n".join(lines), simulacao)
+
+
 def update_dates_message(
     *,
     ticker: str,

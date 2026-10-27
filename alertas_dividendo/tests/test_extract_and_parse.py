@@ -1,5 +1,6 @@
 """Extração de PDF (texto) e os parsers de ENET e COTAHIST."""
 
+import logging
 from datetime import date, datetime
 
 from alertas_dividendo.cotahist import build_quote_line, parse_cotahist
@@ -184,6 +185,34 @@ GARBLED_INSTALLMENTS = """
 equivalente a R$ 0,11344855041 por ação ordinária.
 O pagamento será efetuado em 3 (três) parcelas de R$ 4.000.000,00.
 """
+
+
+UNDATED_PAIR = """
+Aprovaram dividendos de R$ 0,12 por ação e juros sobre o capital próprio de R$ 0,08 por ação.
+"""
+
+
+def test_two_items_without_data_com_stay_undated_and_sum():
+    found = extract_distributions(UNDATED_PAIR, ticker="ZZZZ3", published=date(2026, 10, 21))
+    assert len(found) == 1
+    assert found[0].data_com is None
+    assert found[0].kind == "misto"
+    assert abs(found[0].gross - 0.20) < 1e-12
+    assert abs(found[0].net - (0.12 + 0.08 * 0.85)) < 1e-12
+
+
+def test_same_type_and_value_on_one_record_date_is_logged_not_summed(caplog):
+    day = date(2026, 10, 30)
+    items = [
+        Distribution("dividendo", 0.10, None, day, None, "on"),
+        Distribution("dividendo", 0.10, None, day, None, "on"),
+    ]
+    with caplog.at_level(logging.INFO, logger="alertas_dividendo.extract"):
+        found = combine_same_record_date(items)
+    assert len(found) == 1
+    assert found[0].gross == 0.10
+    assert "colapsados" in caplog.text
+    assert "somaria" in caplog.text
 
 
 def test_unparsed_installments_stay_empty():

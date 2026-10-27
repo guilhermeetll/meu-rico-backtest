@@ -22,6 +22,7 @@ from alertas_dividendo.messages import (
     buy_message,
     captcha_message,
     conferir_message,
+    corrected_value_message,
     exit_message,
     result_message,
     update_dates_message,
@@ -499,18 +500,23 @@ def _ensure_issuers(store: Store, report: Report) -> dict[str, str]:
 
 
 def _priors(store: Store, ticker: str) -> list[Prior]:
+    rank = {"aguardando_compra": 0, "aberta": 1, "encerrada": 2, "ignorado": 3}
+    rows = [
+        row
+        for row in store.signals_for_ticker(ticker)
+        if row["gross_per_share"] is not None
+        and row["status"] in rank
+    ]
+    rows.sort(key=lambda row: (rank[row["status"]], -int(row["id"])))
     priors: list[Prior] = []
-    for row in store.signals_for_ticker(ticker):
-        if row["gross_per_share"] is None:
-            continue
-        if row["status"] not in {"aguardando_compra", "aberta", "encerrada", "ignorado"}:
-            continue
+    for row in rows:
         priors.append(
             Prior(
                 gross=float(row["gross_per_share"]),
                 data_com=date.fromisoformat(row["data_com"]) if row["data_com"] else None,
                 kind=row["kind"],
                 approval=date.fromisoformat(row["approval_date"]) if row["approval_date"] else None,
+                signal_id=int(row["id"]),
             )
         )
     return priors
@@ -702,6 +708,12 @@ def _emit_ticker(
         return False
     if decision.action == "atualizar":
         _apply_update(cfg, store, report, ticker, data_com, data_ex, decision, decision_doc, approval)
+        return False
+    if decision.action == "corrigir_valor":
+        _apply_correction(
+            cfg, store, report, ticker, kind, gross, net, data_com, data_ex,
+            decision, decision_doc, approval,
+        )
         return False
     if decision.action == "conferir_valor":
         signal_key = _signal_key(ticker, kind, None, data_com, approval, decision_doc["protocol"])
@@ -909,6 +921,134 @@ def _apply_update(cfg, store, report, ticker, data_com, data_ex, decision, doc, 
         (data_com.isoformat(), decision.exit_date.isoformat(), signal["id"]),
     )
     _queue(cfg, store, report, f"data_com|{signal['id']}|{data_com.isoformat()}", "data_com", signal["id"], body)
+
+
+def _apply_correction(
+    cfg, store, report, ticker, kind, gross, net, data_com, data_ex, decision, doc, approval,
+) -> None:
+    """Retificação do mesmo evento. Atualiza o sinal que já existe e avisa uma vez."""
+    signal = store.signal_by_id(decision.prior_id) if decision.prior_id else None
+    if signal is None or signal["ticker"] != ticker:
+        signal = _signal_for_correction(store, ticker, kind, data_com, approval)
+    if signal is None or gross is None:
+        line = f"{ticker} protocolo {doc['protocol']} valor_corrigido sem sinal anterior"
+        report.ignore(line)
+        store.log_event("valor_corrigido", ticker=ticker, protocol=doc["protocol"], detail=line)
+        return
+    old_gross = float(signal["gross_per_share"] or decision.prior_gross or 0)
+    band = decision.reason
+    position = store.conn.execute(
+        "SELECT * FROM positions WHERE signal_id=?",
+        (signal["id"],),
+    ).fetchone()
+    already_open = position is not None and position["status"] == "aberta"
+    already_closed = signal["status"] == "encerrada" or (
+        position is not None and position["status"] == "encerrada"
+    )
+    # Ainda não comprou: o yield corrigido fora da faixa cancela a ordem.
+    # Posição já aberta ou encerrada fica; o caixa da saída usa o valor novo.
+    cancel = (
+        signal["status"] == "aguardando_compra"
+        and not already_open
+        and not already_closed
+        and band in {"yield_abaixo", "yield_acima"}
+    )
+    corrected_net = net
+    if kind == "jcp" and corrected_net is None:
+        corrected_net = jcp_net(gross)
+    buy_date = date.fromisoformat(signal["buy_date"]) if signal["buy_date"] else None
+    body = corrected_value_message(
+        ticker=ticker,
+        old_gross=old_gross,
+        new_gross=gross,
+        yld=decision.yld,
+        band=band,
+        cancelled=cancel,
+        already_open=already_open,
+        already_closed=already_closed,
+        kept_waiting=signal["status"] == "aguardando_compra" and not cancel,
+        buy_date=buy_date,
+        url=doc["url"],
+        simulacao=cfg.simulacao,
+    )
+    yld_txt = f"{decision.yld:.4f}" if decision.yld is not None else "sem preço"
+    if cancel:
+        detail = (
+            f"{ticker} protocolo {doc['protocol']} valor corrigido de {old_gross:.6f} "
+            f"para {gross:.6f} yield={yld_txt} {band}; compra cancelada porque ainda não foi executada"
+        )
+    elif already_open and band != "valor_corrigido":
+        detail = (
+            f"{ticker} protocolo {doc['protocol']} valor corrigido de {old_gross:.6f} "
+            f"para {gross:.6f} yield={yld_txt} {band}; posição já aberta, segue com o valor novo"
+        )
+    else:
+        detail = (
+            f"{ticker} protocolo {doc['protocol']} valor corrigido de {old_gross:.6f} "
+            f"para {gross:.6f} yield={yld_txt}"
+        )
+    report.ignore(detail)
+    store.log_event("valor_corrigido", ticker=ticker, protocol=doc["protocol"], detail=detail)
+    log.info(detail)
+    key = f"valor_corrigido|{signal['id']}|{gross:.4f}"
+    if cfg.dry_run:
+        report.messages.append(body)
+        return
+    fields = {
+        "gross_per_share": gross,
+        "net_per_share": corrected_net,
+        "yield": decision.yld,
+        "protocol": doc["protocol"],
+        "document_url": doc["url"],
+        "dedupe_key": _signal_key(ticker, kind, gross, data_com, approval, doc["protocol"]),
+    }
+    if cancel:
+        fields["status"] = "ignorado"
+        fields["ignore_reason"] = band
+    store.update_signal(signal["id"], **fields)
+    if position is not None:
+        if cancel and position["status"] == "aguardando_compra":
+            store.update_position(
+                position["id"],
+                status="cancelada",
+                gross_per_share=gross,
+                net_per_share=corrected_net,
+                kind=kind,
+            )
+        elif position["status"] in {"aguardando_compra", "aberta", "encerrada"}:
+            store.update_position(
+                position["id"],
+                gross_per_share=gross,
+                net_per_share=corrected_net,
+                kind=kind,
+            )
+    _queue(cfg, store, report, key, "valor_corrigido", signal["id"], body)
+
+
+def _signal_for_correction(store: Store, ticker: str, kind: str, data_com: date | None, approval: date | None):
+    if data_com is None:
+        return None
+    approval_clause = "AND approval_date IS NULL" if approval is None else "AND approval_date=?"
+    params: tuple = (ticker, kind, data_com.isoformat())
+    if approval is not None:
+        params = (ticker, kind, data_com.isoformat(), approval.isoformat())
+    rows = store.conn.execute(
+        f"""
+        SELECT * FROM signals
+        WHERE ticker=? AND kind=? AND data_com=?
+        {approval_clause}
+        AND status IN ('aguardando_compra','aberta','encerrada','ignorado')
+        ORDER BY CASE status
+            WHEN 'aguardando_compra' THEN 0
+            WHEN 'aberta' THEN 1
+            WHEN 'encerrada' THEN 2
+            ELSE 3
+        END, id DESC
+        LIMIT 1
+        """,
+        params,
+    ).fetchall()
+    return rows[0] if rows else None
 
 
 def _split_matches(item: dict, ticker: str) -> bool:

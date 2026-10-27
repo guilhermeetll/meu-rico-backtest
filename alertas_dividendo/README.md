@@ -134,6 +134,10 @@ yield desse total usa o bruto; o caixa recebido retém 15% só na parte de JCP.
 Um mesmo R$/ação só é duplicata se a data-com for a mesma, ou se o aviso
 anterior ainda não tinha data-com e for o mesmo anúncio. JCP trimestral de
 valor fixo e parcelas iguais com data-com diferente continuam eventos novos.
+Uma retificação do mesmo papel, da mesma aprovação e da mesma data-com, com
+outro valor, atualiza o sinal que já existe e manda um único aviso de valor
+corrigido. Se o yield corrigido sai da faixa e a compra ainda não foi feita,
+a ordem é cancelada e o motivo fica no log.
 Se o PDF fala em várias parcelas e a tabela não fecha, o aviso fica em conferir valor.
 Se a data-com não saiu do PDF, o alerta de compra avisa que a saída e o
 direito ainda não estão confirmados.

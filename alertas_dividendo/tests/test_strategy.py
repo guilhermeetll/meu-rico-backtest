@@ -155,6 +155,50 @@ def test_record_date_on_christmas_eve_or_a_holiday_is_not_a_session():
     assert not CAL.is_session(_d(2026, 11, 2))
     assert _session_or_keep(_d(2026, 11, 2), CAL) == _d(2026, 10, 30)
     assert exit_session(_d(2026, 11, 2), CAL) == CAL.add_sessions(_d(2026, 10, 30), 20)
+    assert not CAL.is_session(_d(2026, 12, 31))
+    assert _session_or_keep(_d(2026, 12, 31), CAL) == _d(2026, 12, 30)
+    closed = {_d(2026, 12, 24), _d(2026, 12, 25), _d(2026, 12, 31), _d(2027, 1, 1)}
+    for record in (_d(2026, 12, 23), _d(2026, 12, 24), _d(2026, 12, 30), _d(2026, 12, 31)):
+        exit_day = exit_session(record, CAL)
+        assert CAL.is_session(exit_day)
+        assert exit_day not in closed
+    kept = _session_or_keep(_d(2026, 12, 24), CAL)
+    decision = decide(
+        ticker="SAUD3",
+        kind="dividendo",
+        gross=0.50,
+        data_com=kept,
+        approval=_d(2026, 12, 10),
+        published_at=_at(2026, 12, 10, 18, 0),
+        time_known=True,
+        category_is_aviso_ou_ata=True,
+        snapshot=Snapshot(10.0, _d(2026, 12, 10), "COTAHIST", 2_000_000, 60),
+        open_positions=0,
+        priors=[],
+        calendar=CAL,
+    )
+    assert decision.action == "comprar"
+    assert decision.exit_date is not None
+    assert CAL.is_session(decision.exit_date)
+    assert decision.exit_date not in closed
+    year_end = decide(
+        ticker="SAUD3",
+        kind="dividendo",
+        gross=0.50,
+        data_com=_session_or_keep(_d(2026, 12, 31), CAL),
+        approval=_d(2026, 12, 10),
+        published_at=_at(2026, 12, 10, 18, 0),
+        time_known=True,
+        category_is_aviso_ou_ata=True,
+        snapshot=Snapshot(10.0, _d(2026, 12, 10), "COTAHIST", 2_000_000, 60),
+        open_positions=0,
+        priors=[],
+        calendar=CAL,
+    )
+    assert year_end.action == "comprar"
+    assert year_end.exit_date is not None
+    assert CAL.is_session(year_end.exit_date)
+    assert year_end.exit_date not in closed
 
 
 def test_date_only_and_holiday_and_ash_wednesday_clock():
@@ -315,12 +359,63 @@ def test_equal_installments_and_quarterly_jcp_are_not_duplicates():
         priors=[Prior(0.50, None, "jcp", _d(2026, 3, 12))],
     )
     assert other_quarter.action == "comprar"
-    # R$ 0,0378 e R$ 0,040 na mesma data-com não se fundem.
+    # R$ 0,0378 e R$ 0,040 não são o mesmo caixa. Na mesma data-com e no mesmo
+    # anúncio, o valor novo corrige o sinal. Com outra aprovação, é outro evento.
     near = decide(
         **_cash(0.040, _d(2026, 10, 20), approval),
+        priors=[Prior(0.0378, _d(2026, 10, 20), "dividendo", approval, 7)],
+    )
+    assert near.action == "corrigir_valor"
+    assert near.reason == "valor_corrigido"
+    assert near.prior_gross == 0.0378
+    assert near.prior_id == 7
+    assert near.yld == 0.040
+    other = decide(
+        **_cash(0.040, _d(2026, 10, 20), _d(2026, 11, 1)),
         priors=[Prior(0.0378, _d(2026, 10, 20), "dividendo", approval)],
     )
-    assert near.action == "comprar"
+    assert other.action == "comprar"
+
+
+def test_retification_recomputes_yield_and_does_not_open_again():
+    approval = _d(2026, 10, 21)
+    published = _at(2026, 10, 21, 18, 0)
+    prior = Prior(0.50, _d(2026, 10, 30), "dividendo", approval, 3)
+    corrected = decide(
+        ticker="ZZZZ3",
+        kind="dividendo",
+        gross=0.80,
+        data_com=_d(2026, 10, 30),
+        approval=approval,
+        published_at=published,
+        time_known=True,
+        category_is_aviso_ou_ata=True,
+        snapshot=Snapshot(10.0, _d(2026, 10, 21), "COTAHIST", 2_000_000, 60),
+        open_positions=1,
+        priors=[prior],
+        calendar=CAL,
+    )
+    assert corrected.action == "corrigir_valor"
+    assert corrected.reason == "valor_corrigido"
+    assert corrected.yld == 0.08
+    assert corrected.prior_id == 3
+    below = decide(
+        ticker="ZZZZ3",
+        kind="dividendo",
+        gross=0.10,
+        data_com=_d(2026, 10, 30),
+        approval=approval,
+        published_at=published,
+        time_known=True,
+        category_is_aviso_ou_ata=True,
+        snapshot=Snapshot(10.0, _d(2026, 10, 21), "COTAHIST", 2_000_000, 60),
+        open_positions=1,
+        priors=[prior],
+        calendar=CAL,
+    )
+    assert below.action == "corrigir_valor"
+    assert below.reason == "yield_abaixo"
+    assert below.yld == 0.01
 
 
 def test_saud3_decision_matches_the_frozen_trade():
