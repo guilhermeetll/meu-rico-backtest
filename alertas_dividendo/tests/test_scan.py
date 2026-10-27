@@ -2,12 +2,20 @@
 
 from datetime import date, datetime, timedelta
 
+import pytest
+
 from alertas_dividendo.calendar import TZ, Calendar
 from alertas_dividendo.config import Config
-from alertas_dividendo.engine import Report, _advance, _scan, realized_returns
+from alertas_dividendo.engine import Report, _advance, _scan, b3_matches, realized_returns
+from alertas_dividendo.strategy import exit_session
 from alertas_dividendo.store import Store
 
 CAL = Calendar()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_b3(monkeypatch):
+    monkeypatch.setattr("alertas_dividendo.engine.fetch_b3_dividends", lambda _issuer: [])
 
 
 def _cfg(folder, moment: datetime, *, dry_run: bool) -> Config:
@@ -388,3 +396,170 @@ def test_ash_wednesday_reminder_still_once_when_the_early_clocks_are_too_soon(tm
         assert store.conn.execute("SELECT status FROM positions").fetchone()["status"] == "aberta"
     finally:
         store.close()
+
+
+_MTRE = """
+aprovou dividendos intermediários no montante de R$ 12.000.000,00,
+equivalente a R$ 0,11344855041 por ação ordinária.
+O pagamento será efetuado em 3 (três) parcelas de R$ 4.000.000,00.
+   01ª      4.000.000,00    0,03781618347       15/10/2026   20/10/2026   21/10/2026   30/10/2026
+   02ª      4.000.000,00    0,03781618347       15/10/2026   13/11/2026   16/11/2026   27/11/2026
+   03ª      4.000.000,00    0,03781618347       15/10/2026   11/12/2026   14/12/2026   23/12/2026
+  Total    12.000.000,00    0,11344855041
+"""
+
+_SAME_COM = (
+    "Aprovaram dividendos de R$ 0,12 por ação e juros sobre o capital próprio "
+    "de R$ 0,08 por ação. Farão jus os detentores de ações em 30 de outubro de 2026."
+)
+
+
+def _set_close(store: Store, price: float) -> None:
+    store.conn.execute("UPDATE quotes SET close=?", (price,))
+    store.commit()
+
+
+def test_three_installments_are_judged_alone(tmp_path, monkeypatch):
+    """Cada parcela contra o piso de 2%. A soma passaria; cada uma, não."""
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 15, 18, 0, tzinfo=TZ)
+    _seed(store, "1577530", _MTRE, published)
+    _set_close(store, 5.0)
+    cfg = _cfg(tmp_path, datetime(2026, 10, 15, 19, 0, tzinfo=TZ), dry_run=False)
+    try:
+        report = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, report)
+        assert sent == []
+        assert store.open_position_count() == 0
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"] == 0
+        lows = [line for line in report.ignored if "yield_abaixo" in line]
+        assert len(lows) == 3
+        for line in lows:
+            assert "yield=0.0076" in line
+            assert "yield=0.0227" not in line
+    finally:
+        store.close()
+
+
+def test_three_installments_open_three_positions_when_each_clears(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 15, 18, 0, tzinfo=TZ)
+    _seed(store, "1577530", _MTRE, published)
+    _set_close(store, 1.5)
+    cfg = _cfg(tmp_path, datetime(2026, 10, 15, 19, 0, tzinfo=TZ), dry_run=False)
+    try:
+        _scan(cfg, store, CAL, Report(now=cfg.now, dry_run=False))
+        rows = store.conn.execute(
+            "SELECT gross_per_share, data_com, buy_date, exit_date, status, yield FROM signals ORDER BY data_com"
+        ).fetchall()
+        assert len(rows) == 3
+        assert len(sent) == 3
+        assert all("COMPRA" in body and "COMPRA ATRASADA" not in body for body in sent)
+        coms = [date(2026, 10, 20), date(2026, 11, 13), date(2026, 12, 11)]
+        for row, com in zip(rows, coms):
+            assert abs(row["gross_per_share"] - 0.03781618347) < 1e-9
+            assert row["data_com"] == com.isoformat()
+            assert row["buy_date"] == "2026-10-16"
+            assert row["exit_date"] == exit_session(com, CAL).isoformat()
+            assert row["status"] == "aguardando_compra"
+            assert abs(row["yield"] - (0.03781618347 / 1.5)) < 1e-9
+        assert store.open_position_count() == 3
+        exits = {row["exit_date"] for row in store.conn.execute("SELECT exit_date FROM positions")}
+        assert len(exits) == 3
+        _scan(cfg, store, CAL, Report(now=cfg.now, dry_run=False))
+        assert len(sent) == 3
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"] == 3
+        assert store.open_position_count() == 3
+    finally:
+        store.close()
+
+
+def test_same_record_date_is_one_summed_event(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 21, 18, 0, tzinfo=TZ)
+    _seed(store, "8801", _SAME_COM, published)
+    cfg = _cfg(tmp_path, datetime(2026, 10, 21, 19, 0, tzinfo=TZ), dry_run=False)
+    try:
+        _scan(cfg, store, CAL, Report(now=cfg.now, dry_run=False))
+        assert len(sent) == 1
+        row = store.conn.execute(
+            "SELECT gross_per_share, kind, data_com, status FROM signals"
+        ).fetchone()
+        assert abs(row["gross_per_share"] - 0.20) < 1e-9
+        assert row["kind"] == "misto"
+        assert row["data_com"] == "2026-10-30"
+        assert row["status"] == "aguardando_compra"
+        assert store.open_position_count() == 1
+    finally:
+        store.close()
+
+
+def test_b3_check_after_data_com_never_opens_a_trade(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+
+    def fake(issuer):
+        assert issuer == "ZZZZ"
+        return [
+            {"typeStock": "ON", "lastDatePrior": "01/10/2026", "rate": "1,00", "label": "DIVIDENDO"},
+            {"typeStock": "ON", "lastDatePrior": "20/10/2026", "rate": "0,50", "label": "DIVIDENDO"},
+            {"typeStock": "PN", "lastDatePrior": "20/10/2026", "rate": "9,99", "label": "DIVIDENDO"},
+        ]
+
+    monkeypatch.setattr("alertas_dividendo.engine.fetch_b3_dividends", fake)
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 15, 18, 0, tzinfo=TZ)
+    _seed(store, "1579001", "Aviso de dividendos sem valor por acao.", published)
+    cfg = _cfg(tmp_path, datetime(2026, 10, 27, 16, 0, tzinfo=TZ), dry_run=False)
+    try:
+        first = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, first)
+        assert sent == []
+        assert store.open_position_count() == 0
+        signal = store.conn.execute(
+            "SELECT id, status, gross_per_share, ignore_reason FROM signals"
+        ).fetchone()
+        assert signal["status"] == "ignorado"
+        assert signal["gross_per_share"] is None
+        assert signal["ignore_reason"] == "prazo de compra já passou"
+        checks = store.b3_checks()
+        assert len(checks) == 1
+        assert checks[0]["value_per_share"] == 0.5
+        assert checks[0]["data_com"] == "2026-10-20"
+        assert checks[0]["ticker"] == "ZZZZ3"
+        assert any("b3_conferencia" == row["reason"] for row in store.recent_events(10))
+        assert "só conferência, sem alerta" in first.ignored[-1]
+        second = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, second)
+        assert sent == []
+        assert store.open_position_count() == 0
+        assert len(store.b3_checks()) == 1
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"] == 1
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM positions").fetchone()["n"] == 0
+    finally:
+        store.close()
+
+
+def test_b3_match_waits_until_the_record_date():
+    rows = [{"typeStock": "ON", "lastDatePrior": "30/10/2026", "rate": "0,50", "label": "DIVIDENDO"}]
+    assert b3_matches(
+        rows,
+        ticker="ZZZZ3",
+        data_com=date(2026, 10, 30),
+        published=date(2026, 10, 21),
+        today=date(2026, 10, 27),
+    ) == []
+    found = b3_matches(
+        rows,
+        ticker="ZZZZ3",
+        data_com=date(2026, 10, 30),
+        published=date(2026, 10, 21),
+        today=date(2026, 10, 30),
+    )
+    assert found == [{"data_com": date(2026, 10, 30), "value": 0.5, "label": "DIVIDENDO"}]

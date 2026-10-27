@@ -12,7 +12,7 @@ from alertas_dividendo.calendar import TZ, Calendar
 from alertas_dividendo.config import Config
 from alertas_dividendo.cvm_parse import is_aviso_ou_ata, relevant
 from alertas_dividendo.decide import Prior, Snapshot, decide
-from alertas_dividendo.extract import Distribution, extract_distributions, select_for_ticker
+from alertas_dividendo.extract import Distribution, combine_same_record_date, extract_distributions
 from alertas_dividendo.messages import (
     buy_message,
     captcha_message,
@@ -206,6 +206,152 @@ def _cross_check(issuer: str, data_com: date, gross: float, kind: str) -> str | 
             notes.append(f"B3 classifica o evento como dividendo ({item.get('label')})")
         return "; ".join(notes) if notes else None
     return None
+
+
+_B3_SUFFIX = {
+    "ON": "3",
+    "PN": "4",
+    "PNA": "5",
+    "PNB": "6",
+    "PNC": "7",
+    "PND": "8",
+    "UNT": "11",
+    "UNT N2": "11",
+}
+
+
+def _b3_date(raw: object) -> date | None:
+    text = str(raw or "").strip()
+    if len(text) < 10:
+        return None
+    try:
+        day, month, year = text[:10].split("/")
+        return date(int(year), int(month), int(day))
+    except ValueError:
+        return None
+
+
+def _b3_number(raw: object) -> float | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        if "," in text:
+            text = text.replace(".", "").replace(",", ".")
+        value = float(text)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _b3_matches_ticker(item: dict, ticker: str) -> bool:
+    stock = str(item.get("typeStock") or "").strip().upper()
+    if not stock:
+        return True
+    suffix = _B3_SUFFIX.get(stock)
+    if suffix is None:
+        return True
+    return ticker.endswith(suffix)
+
+
+def b3_matches(
+    rows: list[dict],
+    *,
+    ticker: str,
+    data_com: date | None,
+    published: date,
+    today: date,
+) -> list[dict]:
+    """Proventos da B3 para conferência. Só entra o que já passou da data-com.
+
+    Com data-com no sinal, só aquela data. Sem ela, o que a B3 lista entre a
+    publicação e hoje — a API só mostra o provento depois da data-com.
+    """
+    if data_com is not None and today < data_com:
+        return []
+    found: list[dict] = []
+    for item in rows:
+        if not _b3_matches_ticker(item, ticker):
+            continue
+        record = _b3_date(item.get("lastDatePrior"))
+        if record is None or record > today:
+            continue
+        if data_com is not None:
+            if record != data_com:
+                continue
+        elif record < published:
+            continue
+        value = _b3_number(item.get("rate"))
+        if value is None:
+            value = _b3_number(item.get("valueCash"))
+        if value is None:
+            continue
+        found.append(
+            {
+                "data_com": record,
+                "value": value,
+                "label": str(item.get("label") or item.get("corporateAction") or "").strip(),
+            }
+        )
+    return found
+
+
+def _record_b3_checks(cfg: Config, store: Store, report: Report) -> None:
+    """Depois da data-com, grava o R$/ação da B3. Não abre posição nem avisa compra."""
+    rows = store.conn.execute(
+        """
+        SELECT * FROM signals
+        WHERE gross_per_share IS NULL AND status IN ('conferir', 'ignorado')
+        """
+    ).fetchall()
+    today = aware(cfg.now).date()
+    for signal in rows:
+        issuer = signal["issuer"] or ""
+        if not issuer:
+            continue
+        data_com = date.fromisoformat(signal["data_com"]) if signal["data_com"] else None
+        if data_com is not None and today < data_com:
+            continue
+        published = _parse_dt(signal["published_at"]).date()
+        try:
+            cash = fetch_b3_dividends(issuer)
+        except Exception as exc:
+            log.info("conferência B3 de %s falhou: %s", issuer, exc)
+            continue
+        matches = b3_matches(
+            cash,
+            ticker=signal["ticker"],
+            data_com=data_com,
+            published=published,
+            today=today,
+        )
+        for item in matches:
+            recorded = store.insert_b3_check(
+                signal_id=int(signal["id"]),
+                protocol=signal["protocol"] or "",
+                ticker=signal["ticker"],
+                data_com=item["data_com"].isoformat(),
+                value_per_share=item["value"],
+                label=item["label"],
+                recorded_at=cfg.now.isoformat(timespec="seconds"),
+            )
+            if not recorded:
+                continue
+            detail = (
+                f"{signal['ticker']} protocolo {signal['protocol']} "
+                f"B3 R$ {item['value']:.6f} data-com {item['data_com'].isoformat()} "
+                f"({item['label'] or 'provento'}) — só conferência, sem alerta"
+            )
+            report.ignore(detail)
+            store.log_event(
+                "b3_conferencia",
+                ticker=signal["ticker"],
+                protocol=signal["protocol"] or "",
+                detail=detail,
+            )
+            log.info(detail)
 
 
 def _queue(cfg: Config, store: Store, report: Report, key: str, kind: str, signal_id: int | None, body: str) -> None:
@@ -412,32 +558,21 @@ def _scan(cfg: Config, store: Store, calendar: Calendar, report: Report) -> None
             continue
         texts = {doc["protocol"]: _document_text_cfg(cfg, store, doc, published.date()) for doc in group}
         for ticker, snap, ready in liquid:
-            pairs: list[tuple] = []
-            for doc in group:
-                text = texts.get(doc["protocol"]) or ""
-                found = extract_distributions(text, ticker=ticker, published=published.date())
-                chosen = select_for_ticker(found, ticker)
-                if chosen:
-                    pairs.append((doc, chosen))
-            opened = _emit_ticker(
-                cfg,
-                store,
-                calendar,
-                report,
-                ticker,
-                issuer,
-                company,
-                group,
-                pairs,
-                snap,
-                published,
-                time_known,
-                open_slots,
-                yield_session,
-                ready,
-            )
-            if opened:
-                open_slots += 1
+            events = _cash_events(group, texts, ticker, published.date())
+            if not events:
+                _emit_ticker(
+                    cfg, store, calendar, report, ticker, issuer, company, group, None, None,
+                    snap, published, time_known, open_slots, yield_session, ready,
+                )
+                continue
+            for source_doc, dist in events:
+                opened = _emit_ticker(
+                    cfg, store, calendar, report, ticker, issuer, company, group, source_doc, dist,
+                    snap, published, time_known, open_slots, yield_session, ready,
+                )
+                if opened:
+                    open_slots += 1
+    _record_b3_checks(cfg, store, report)
 
 
 def relevant_row(doc) -> bool:
@@ -476,13 +611,31 @@ def realized_returns(store: Store) -> list[float]:
     return out
 
 
+def _cash_events(group, texts, ticker: str, published: date) -> list[tuple[dict, Distribution]]:
+    """Um evento por data-com. O que divide a mesma data-com é somado."""
+    tagged: list[tuple[dict, Distribution]] = []
+    for doc in group:
+        text = texts.get(doc["protocol"]) or ""
+        for item in extract_distributions(text, ticker=ticker, published=published):
+            tagged.append((doc, item))
+    if not tagged:
+        return []
+    merged = combine_same_record_date([item for _, item in tagged])
+    events: list[tuple[dict, Distribution]] = []
+    for item in merged:
+        same = [doc for doc, raw in tagged if raw.data_com == item.data_com]
+        aviso = next((doc for doc in same if doc["category"] == "Aviso aos Acionistas"), None)
+        events.append((aviso or (same[0] if same else tagged[0][0]), item))
+    return events
+
+
 def _emit_ticker(
-    cfg, store, calendar, report, ticker, issuer, company, group, pairs, snap, published, time_known, open_slots,
-    reference: date, reference_ready: bool,
+    cfg, store, calendar, report, ticker, issuer, company, group, source_doc, dist, snap, published, time_known,
+    open_slots, reference: date, reference_ready: bool,
 ) -> bool:
     earliest = min(group, key=lambda doc: doc["published_at"])
     approval = date.fromisoformat(earliest["reference_date"]) if earliest["reference_date"] else published.date()
-    if not pairs:
+    if dist is None:
         aviso = next((doc for doc in group if is_aviso_ou_ata(doc["category"])), None)
         if aviso is None:
             line = f"{ticker} protocolo {earliest['protocol']} extracao_falhou (sem alerta: não é aviso/ata)"
@@ -496,12 +649,9 @@ def _emit_ticker(
         data_ex = None
         net = None
     else:
-        with_com = [pair for pair in pairs if pair[1].data_com]
-        pool = with_com or pairs
-        avisos = [pair for pair in pool if pair[0]["category"] == "Aviso aos Acionistas"]
-        decision_doc, dist = (avisos or pool)[0]
-        data_com = dist.data_com or next((pair[1].data_com for pair in pairs if pair[1].data_com), None)
-        data_ex = dist.data_ex or next((pair[1].data_ex for pair in pairs if pair[1].data_ex), None)
+        decision_doc = source_doc or earliest
+        data_com = dist.data_com
+        data_ex = dist.data_ex
         gross = dist.gross
         net = dist.net
         kind = dist.kind
@@ -637,7 +787,8 @@ def _emit_ticker(
             "closed_at": None,
         }
     )
-    key = f"compra|{ticker}|{kind}|{gross:.4f}|{approval.isoformat()}"
+    anchor = data_com or approval
+    key = f"compra|{ticker}|{kind}|{gross:.4f}|{anchor.isoformat() if anchor else ''}"
     _queue(cfg, store, report, key, "compra", signal_id, body)
     return True
 

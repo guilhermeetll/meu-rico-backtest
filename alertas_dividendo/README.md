@@ -116,10 +116,17 @@ um aviso no Telegram e não consulta o ENET de novo até o dia seguinte. O aviso
 sai no máximo uma vez por dia. Não tentamos contornar o captcha.
 
 Apoio, com atraso de 1 a 3 dias: o ZIP anual de IPE dos dados abertos. A B3
-lista o provento em geral só depois da data-com; serve para conferir valor e
-datas, não para disparar a compra. Preço e volume vêm do COTAHIST. Se o arquivo
-do dia ainda não saiu, o fechamento do dia pode vir do Yahoo Finance, e a
-mensagem diz a origem de cada número.
+lista o provento em geral só depois da data-com. Num aviso em “conferir valor”,
+depois da data-com o monitor grava o R$/ação da API no log e na tabela
+`b3_checks`. Isso não gera alerta, posição nem sinal atrasado. Preço e volume
+vêm do COTAHIST. Se o arquivo do dia ainda não saiu, o fechamento do dia pode
+vir do Yahoo Finance, e a mensagem diz a origem de cada número.
+
+Parcelas com data-com diferente são eventos separados: cada uma enfrenta o
+piso de 2% sozinha, com a própria saída (20 pregões depois da sua data-com).
+A compra continua sendo o pregão seguinte à publicação do aviso. Valores só
+se somam quando caem na mesma data-com (dividendo e JCP pagos juntos). Se o
+PDF fala em várias parcelas e a tabela não fecha, o aviso fica em conferir valor.
 
 ## Regras (não alterar)
 

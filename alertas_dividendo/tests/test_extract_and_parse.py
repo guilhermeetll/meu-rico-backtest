@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 from alertas_dividendo.cotahist import build_quote_line, parse_cotahist
 from alertas_dividendo.cvm_parse import norm_cvm, parse_enet_dados, parse_ipe_csv
-from alertas_dividendo.extract import extract_distributions
+from alertas_dividendo.extract import Distribution, combine_same_record_date, extract_distributions
 from alertas_dividendo.messages import DISCLAIMER, buy_message, result_message
 
 SAUD = """
@@ -104,9 +104,53 @@ O pagamento será efetuado em 3 (três) parcelas de R$ 4.000.000,00.
 """
 
 
-def test_mtre_installments_are_not_a_single_per_share_value():
+def test_mtre_installments_are_three_events():
     found = extract_distributions(MTRE, ticker="MTRE3", published=date(2026, 10, 15))
-    assert found == []
+    assert len(found) == 3
+    assert [item.data_com for item in found] == [
+        date(2026, 10, 20),
+        date(2026, 11, 13),
+        date(2026, 12, 11),
+    ]
+    assert [item.data_ex for item in found] == [
+        date(2026, 10, 21),
+        date(2026, 11, 16),
+        date(2026, 12, 14),
+    ]
+    for item in found:
+        assert abs(item.gross - 0.03781618347) < 1e-12
+        assert item.gross < 0.05
+    assert abs(sum(item.gross for item in found) - 0.11344855041) < 1e-9
+    headline = Distribution(
+        "dividendo", 0.11344855041, None, date(2026, 10, 20), None, "on"
+    )
+    merged = combine_same_record_date([headline, *found])
+    assert len(merged) == 3
+    assert all(abs(item.gross - 0.03781618347) < 1e-9 for item in merged)
+
+
+SAME_RECORD = """
+Aprovaram dividendos de R$ 0,12 por ação e juros sobre o capital próprio de R$ 0,08 por ação.
+Farão jus os detentores de ações em 30 de outubro de 2026.
+"""
+
+
+def test_same_record_date_dividend_and_jcp_are_summed():
+    found = extract_distributions(SAME_RECORD, ticker="ZZZZ3", published=date(2026, 10, 21))
+    assert len(found) == 1
+    assert found[0].kind == "misto"
+    assert abs(found[0].gross - 0.20) < 1e-12
+    assert found[0].data_com == date(2026, 10, 30)
+
+
+GARBLED_INSTALLMENTS = """
+equivalente a R$ 0,11344855041 por ação ordinária.
+O pagamento será efetuado em 3 (três) parcelas de R$ 4.000.000,00.
+"""
+
+
+def test_unparsed_installments_stay_empty():
+    assert extract_distributions(GARBLED_INSTALLMENTS, ticker="MTRE3", published=date(2026, 10, 15)) == []
 
 
 def test_empty_text_means_conferir_valor():

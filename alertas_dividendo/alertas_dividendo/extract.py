@@ -14,7 +14,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from alertas_dividendo.strategy import JCP_WITHHOLDING
+from alertas_dividendo.strategy import JCP_WITHHOLDING, same_cash_event
 
 MONTHS = {
     "janeiro": 1,
@@ -276,54 +276,100 @@ def _prose_hits(flat: str, document_kind: str) -> list[Distribution]:
             continue
         if not _accept(value):
             continue
-        window = flat[max(0, match.start() - 70) : match.end() + 40]
+        before = flat[max(0, match.start() - 64) : match.start()]
         share_class = _share_class(match.group(0) + " " + flat[match.end() : match.end() + 30])
-        raw.append((value, share_class, _stated_role(window)))
+        # O papel (bruto/líquido) olha só as palavras coladas no número.
+        # O tipo olha mais atrás, para achar "dividendo" ou "juros sobre".
+        raw.append(
+            (value, share_class, _stated_role(before[-24:]), _local_kind(before, document_kind))
+        )
 
     if not raw:
         return []
 
-    by_class: dict[str, list[tuple[float, str]]] = {}
-    for value, share_class, role in raw:
-        by_class.setdefault(share_class, []).append((value, role))
+    by_class: dict[str, list[tuple[float, str, str]]] = {}
+    for value, share_class, role, local_kind in raw:
+        by_class.setdefault(share_class, []).append((value, role, local_kind))
 
     hits: list[Distribution] = []
     for share_class, pairs in by_class.items():
-        brutos = [value for value, role in pairs if role == "bruto"]
-        liquidos = [value for value, role in pairs if role == "liquido"]
-        plain = [value for value, role in pairs if role == "nenhum"]
-        kind = document_kind
-        net: float | None = None
-        if brutos and liquidos and kind in {"jcp", "misto"}:
-            gross = brutos[0]
-            net = liquidos[0]
-            kind = "jcp"
-        elif brutos:
-            gross = brutos[0]
-            if kind == "jcp":
-                net = gross * (1.0 - JCP_WITHHOLDING)
-        elif liquidos and kind == "jcp":
-            net = liquidos[0]
-            gross = net / (1.0 - JCP_WITHHOLDING)
-        elif liquidos and kind == "misto":
-            # Não dá para saber se o único número já é líquido. Não retém 15%.
-            gross = liquidos[0]
-            net = None
-        else:
-            gross = (plain or liquidos or brutos)[0]
-            if kind == "jcp":
-                net = gross * (1.0 - JCP_WITHHOLDING)
-        hits.append(
-            Distribution(
-                kind=kind,
-                gross=gross,
-                net=net,
-                data_com=data_com,
-                data_ex=data_ex,
-                share_class=share_class,
+        for gross, net, kind in _cash_components(pairs, document_kind):
+            hits.append(
+                Distribution(
+                    kind=kind,
+                    gross=gross,
+                    net=net,
+                    data_com=data_com,
+                    data_ex=data_ex,
+                    share_class=share_class,
+                )
             )
-        )
     return hits
+
+
+def _is_stated_net(net: float, gross: float) -> bool:
+    expected = gross * (1.0 - JCP_WITHHOLDING)
+    return abs(net - expected) <= max(0.005, 0.02 * gross)
+
+
+def _local_kind(before: str, document_kind: str) -> str:
+    """O rótulo mais perto do valor: dividendo ou JCP."""
+    jcp_at = max(before.rfind("juros sobre"), before.rfind("jcp"), before.rfind("jscp"))
+    div_at = before.rfind("dividendo")
+    if jcp_at < 0 and div_at < 0:
+        return document_kind
+    if jcp_at > div_at:
+        return "jcp"
+    return "dividendo"
+
+
+def _cash_components(
+    pairs: list[tuple[float, str, str]],
+    document_kind: str,
+) -> list[tuple[float, float | None, str]]:
+    """Cada pagamento por ação. Bruto e líquido do mesmo JCP contam uma vez.
+
+    Dois valores diferentes na mesma data-com (dividendo e JCP) ficam em
+    componentes separados; quem chama soma os da mesma data-com.
+    """
+    brutos = [(value, local) for value, role, local in pairs if role == "bruto"]
+    liquidos = [(value, local) for value, role, local in pairs if role == "liquido"]
+    plain = list(dict.fromkeys((value, local) for value, role, local in pairs if role == "nenhum"))
+    components: list[tuple[float, float | None, str]] = []
+    if (
+        brutos
+        and liquidos
+        and document_kind in {"jcp", "misto"}
+        and _is_stated_net(liquidos[0][0], brutos[0][0])
+    ):
+        components.append((brutos[0][0], liquidos[0][0], "jcp"))
+        brutos = brutos[1:]
+        liquidos = liquidos[1:]
+
+    def emit_plain(value: float, local: str) -> None:
+        kind = local if local in {"jcp", "dividendo"} else document_kind
+        if kind == "jcp":
+            components.append((value, value * (1.0 - JCP_WITHHOLDING), "jcp"))
+        elif kind in {"misto", "indefinido"}:
+            components.append((value, None, "dividendo"))
+        else:
+            components.append((value, None, kind))
+
+    for value, local in plain:
+        emit_plain(value, local)
+    for value, local in brutos:
+        if local == "jcp" or document_kind in {"jcp", "misto"}:
+            components.append((value, value * (1.0 - JCP_WITHHOLDING), "jcp"))
+        else:
+            emit_plain(value, local)
+    for value, local in liquidos:
+        if local == "jcp" or document_kind == "jcp":
+            components.append((value / (1.0 - JCP_WITHHOLDING), value, "jcp"))
+        elif document_kind == "misto":
+            components.append((value, None, "misto"))
+        else:
+            emit_plain(value, local)
+    return components
 
 
 def _table_rows(text: str) -> list[tuple[date, date | None, dict[str, float]]]:
@@ -377,34 +423,182 @@ def _pick_row(
     return min(rows, key=lambda row: (abs((row[0] - published).days), -row[0].toordinal()))
 
 
-def _installment_sum(text: str, gross: float) -> bool:
-    """O R$/ação do parágrafo é a soma de várias parcelas com datas-base diferentes.
+_INSTALLMENT_ROW = re.compile(
+    r"(?:(?<!\d)(\d{1,2})\s*[ªaºo]|parcela\s+(\d{1,2}))\s+"
+    r"(?:\d{1,3}(?:\.\d{3})+,\d{2}\s+)?"
+    r"(\d+,\d{4,12})\s+"
+    r"((?:\d{2}/\d{2}/\d{4}\s*){3,4})",
+    re.IGNORECASE,
+)
+_MULTI_INSTALLMENT = re.compile(
+    r"\d+\s*\([^)]{0,20}\)\s*parcelas|\bem\s+\d+\s+parcelas|\bparcelas\b",
+    re.IGNORECASE,
+)
 
-    O aviso da Mitre (MTRE3, out/2026) declara R$ 0,11344855041 por ação e, na
-    tabela, três parcelas de R$ 0,03781618347. A B3 lista cada parcela. Usar a
-    soma como se fosse um único provento erra o yield e o caixa do swing.
+
+def _parse_row_dates(blob: str) -> tuple[date, date] | None:
+    """Data-com e data-ex de uma linha de cronograma.
+
+    Quatro datas, na ordem do aviso da Mitre: divulgação, base (data-com),
+    ex-dividendo, pagamento. Três datas: data-com, ex, pagamento. A data-ex
+    tem de cair nos dez dias seguintes à data-com.
     """
-    if gross <= 0 or "parcela" not in flatten(text):
-        return False
-    parts: list[float] = []
-    for match in re.finditer(r"(?<!\d)(\d+,\d{4,12})(?!\d)", flatten(text)):
+    found: list[date] = []
+    for match in _DATE_NUM.finditer(blob):
+        parsed = _parse_date("num", match.groups())
+        if parsed:
+            found.append(parsed)
+    if len(found) >= 4:
+        _disclosure, record, ex_date, payment = found[:4]
+        gap = ex_date - record
+        if record < _disclosure or not (timedelta(0) < gap <= timedelta(days=10)) or payment < ex_date:
+            return None
+        return record, ex_date
+    if len(found) == 3:
+        record, ex_date, payment = found
+        gap = ex_date - record
+        if not (timedelta(0) < gap <= timedelta(days=10)) or payment < ex_date:
+            return None
+        return record, ex_date
+    return None
+
+
+def _document_share_class(flat: str) -> str:
+    ordinary = "ordinar" in flat
+    preferred = "preferenc" in flat
+    if ordinary and not preferred:
+        return "on"
+    if preferred and not ordinary:
+        return "pn"
+    if "unit" in flat:
+        return "unit"
+    return "any"
+
+
+def _installment_events(text: str, document_kind: str) -> list[Distribution] | None:
+    """Parcelas com data-com própria. None = o texto não é cronograma de parcelas.
+
+    Lista vazia = fala em várias parcelas, mas a tabela não fecha: conferir valor.
+    Cada parcela vira um evento. O total do parágrafo não entra.
+    """
+    flat = flatten(text)
+    if "parcela" not in flat:
+        return None
+    kind = document_kind if document_kind != "indefinido" else "dividendo"
+    if kind == "misto":
+        kind = "dividendo"
+    share_class = _document_share_class(flat)
+    rows: list[Distribution] = []
+    seen: set[tuple[date, float]] = set()
+    for match in _INSTALLMENT_ROW.finditer(flat):
         try:
-            value = parse_br_number(match.group(1))
+            gross = parse_br_number(match.group(3))
         except ValueError:
             continue
-        if 0 < value < gross * 0.98:
-            parts.append(round(value, 10))
-    if len(parts) < 2:
-        return False
-    distinct = set(parts)
-    if len(distinct) >= 2 and abs(sum(distinct) - gross) / gross <= 0.02:
-        return True
-    for value in distinct:
-        ratio = gross / value
-        nearest = round(ratio)
-        if nearest >= 2 and abs(ratio - nearest) <= 0.02 * nearest and parts.count(value) >= 2:
-            return True
-    return False
+        if not _accept(gross):
+            continue
+        parsed = _parse_row_dates(match.group(4))
+        if parsed is None:
+            continue
+        record, ex_date = parsed
+        key = (record, round(gross, 8))
+        if key in seen:
+            continue
+        seen.add(key)
+        net = gross * (1.0 - JCP_WITHHOLDING) if kind == "jcp" else None
+        rows.append(
+            Distribution(
+                kind=kind,
+                gross=gross,
+                net=net,
+                data_com=record,
+                data_ex=ex_date,
+                share_class=share_class,
+            )
+        )
+    distinct_dates = {item.data_com for item in rows}
+    if len(rows) >= 2 and len(distinct_dates) >= 2:
+        return rows
+    if _MULTI_INSTALLMENT.search(flat):
+        return []
+    return None
+
+
+def _without_installment_total(items: list[Distribution]) -> list[Distribution]:
+    """O total do parágrafo não entra junto com as parcelas que o compõem."""
+    if len(items) < 2:
+        return items
+    kept: list[Distribution] = []
+    for item in items:
+        by_date: dict[date | None, float] = {}
+        for other in items:
+            if other is item or other.gross >= item.gross * 0.98:
+                continue
+            by_date[other.data_com] = other.gross
+        dated = [day for day in by_date if day is not None]
+        if len(dated) < 2:
+            kept.append(item)
+            continue
+        total = sum(by_date.values())
+        if total > 0 and abs(item.gross - total) / total <= 0.02:
+            continue
+        kept.append(item)
+    return kept
+
+
+def combine_same_record_date(items: list[Distribution]) -> list[Distribution]:
+    """Soma o que cai na mesma data-com. Datas-com diferentes não se somam.
+
+    O backtest agrupa por papel, aprovação e data-com e soma o caixa
+    (`groupby(['issuer','tk','ap','com']).v.sum()`). Dividendo e JCP do mesmo
+    dia viram um evento. Cada parcela, com a sua data-com, continua sozinha.
+    """
+    items = _without_installment_total(items)
+    grouped: dict[date | None, list[Distribution]] = {}
+    order: list[date | None] = []
+    for item in items:
+        if item.data_com not in grouped:
+            order.append(item.data_com)
+            grouped[item.data_com] = []
+        bucket = grouped[item.data_com]
+        if any(item.kind == prev.kind and same_cash_event(item.gross, prev.gross) for prev in bucket):
+            continue
+        bucket.append(item)
+    combined: list[Distribution] = []
+    for record in order:
+        bucket = grouped[record]
+        if len(bucket) == 1:
+            combined.append(bucket[0])
+            continue
+        gross = sum(item.gross for item in bucket)
+        net_total = 0.0
+        for item in bucket:
+            if item.kind == "jcp":
+                net_total += item.net if item.net is not None else item.gross * (1.0 - JCP_WITHHOLDING)
+            else:
+                net_total += item.gross if item.net is None else item.net
+        kinds = {item.kind for item in bucket}
+        if kinds == {"jcp"}:
+            kind = "jcp"
+        elif "jcp" in kinds:
+            kind = "misto"
+        elif len(kinds) == 1:
+            kind = bucket[0].kind
+        else:
+            kind = "misto"
+        ex_dates = {item.data_ex for item in bucket if item.data_ex is not None}
+        data_ex = next(iter(ex_dates)) if len(ex_dates) == 1 else None
+        combined.append(
+            Distribution(
+                kind=kind,
+                gross=gross,
+                net=net_total if kind in {"jcp", "misto"} else None,
+                data_com=record,
+                data_ex=data_ex,
+                share_class=bucket[0].share_class,
+            )
+        )
+    return combined
 
 
 def extract_distributions(
@@ -418,19 +612,20 @@ def extract_distributions(
         return []
     published_day = published.date() if isinstance(published, datetime) else published
     document_kind = infer_kind(text)
+    installments = _installment_events(text, document_kind)
+    if installments is not None:
+        chosen = _for_ticker(installments, ticker)
+        return combine_same_record_date(chosen)
     flat = flatten(text)
     prose = _prose_hits(flat, document_kind)
-    wanted = ticker_class(ticker)
-    chosen = [item for item in prose if item.share_class in {wanted, "any"}] if ticker else prose
+    chosen = _for_ticker(prose, ticker)
     if chosen:
-        safe = [item for item in chosen if not _installment_sum(text, item.gross)]
-        if len(safe) < len(chosen):
-            return safe
-        return chosen
+        return combine_same_record_date(chosen)
     row = _pick_row(_table_rows(text), published_day)
     if row is None:
         return []
     corte, ex, values = row
+    wanted = ticker_class(ticker)
     share_class = wanted if wanted in values else "any"
     gross = values.get(wanted, values.get("unit", next(iter(values.values()))))
     net = gross * (1.0 - JCP_WITHHOLDING) if document_kind == "jcp" else None
@@ -447,14 +642,19 @@ def extract_distributions(
     ]
 
 
-def select_for_ticker(items: list[Distribution], ticker: str) -> Distribution | None:
-    if not items:
-        return None
+def _for_ticker(items: list[Distribution], ticker: str | None) -> list[Distribution]:
+    if not ticker:
+        return items
     wanted = ticker_class(ticker)
     specific = [item for item in items if item.share_class == wanted]
     if specific:
-        return specific[0]
+        return specific
     generic = [item for item in items if item.share_class == "any"]
     if generic:
-        return generic[0]
-    return items[0]
+        return generic
+    return items
+
+
+def select_for_ticker(items: list[Distribution], ticker: str) -> Distribution | None:
+    chosen = _for_ticker(items, ticker)
+    return chosen[0] if chosen else None

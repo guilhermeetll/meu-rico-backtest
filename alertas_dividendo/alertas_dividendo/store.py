@@ -130,6 +130,17 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS b3_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id INTEGER NOT NULL,
+    protocol TEXT,
+    ticker TEXT,
+    data_com TEXT,
+    value_per_share REAL,
+    label TEXT,
+    recorded_at TEXT,
+    UNIQUE(signal_id, data_com, value_per_share, label)
+);
 """
 
 
@@ -157,6 +168,35 @@ class Store:
             "INSERT INTO meta (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
+        )
+
+    def insert_b3_check(
+        self,
+        *,
+        signal_id: int,
+        protocol: str,
+        ticker: str,
+        data_com: str,
+        value_per_share: float,
+        label: str,
+        recorded_at: str,
+    ) -> bool:
+        """Grava a conferência. False se essa linha da B3 já estava registrada."""
+        cursor = self.conn.execute(
+            """
+            INSERT OR IGNORE INTO b3_checks (
+                signal_id, protocol, ticker, data_com, value_per_share, label, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (signal_id, protocol, ticker, data_com, value_per_share, label, recorded_at),
+        )
+        return cursor.rowcount > 0
+
+    def b3_checks(self, signal_id: int | None = None) -> list[sqlite3.Row]:
+        if signal_id is None:
+            return list(self.conn.execute("SELECT * FROM b3_checks ORDER BY id").fetchall())
+        return list(
+            self.conn.execute("SELECT * FROM b3_checks WHERE signal_id=? ORDER BY id", (signal_id,)).fetchall()
         )
 
     def log_event(self, reason: str, *, ticker: str = "", protocol: str = "", detail: str = "") -> None:

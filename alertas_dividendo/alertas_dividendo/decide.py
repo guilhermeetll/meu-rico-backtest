@@ -81,6 +81,9 @@ def decide(
                 continue
             if not same_cash_event(prior.gross, gross):
                 continue
+            # Parcela com outra data-com é outro evento, mesmo com o mesmo R$/ação.
+            if prior.data_com is not None and data_com is not None and prior.data_com != data_com:
+                continue
             if prior.data_com is None and data_com is not None:
                 if not has_rights(plan.buy_date, data_com):
                     return Decision("ignorar", "sem_direito", plan=plan)
