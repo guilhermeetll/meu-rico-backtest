@@ -120,21 +120,33 @@ lista o provento em geral só depois da data-com. Num aviso em “conferir valor
 depois da data-com o monitor grava o R$/ação da API no log e na tabela
 `b3_checks`. Isso não gera alerta, posição nem sinal atrasado. Preço e volume
 vêm do COTAHIST. Se o arquivo do dia ainda não saiu, o fechamento do dia pode
-vir do Yahoo Finance, e a mensagem diz a origem de cada número.
+vir do Yahoo Finance, e a mensagem diz a origem de cada número. Uma linha do
+Yahoo, mesmo com volume zero, não substitui o arquivo do dia e não entra na
+média de 60 pregões. Quando o COTAHIST chega, ele grava o volume oficial por
+cima. Desdobramento ou grupamento no meio da posição é registrado no log e na
+mensagem de saída; o preço não é ajustado.
 
 Parcelas com data-com diferente são eventos separados: cada uma enfrenta o
 piso de 2% sozinha, com a própria saída (20 pregões depois da sua data-com).
 A compra continua sendo o pregão seguinte à publicação do aviso. Valores só
-se somam quando caem na mesma data-com (dividendo e JCP pagos juntos). Se o
-PDF fala em várias parcelas e a tabela não fecha, o aviso fica em conferir valor.
+se somam quando caem na mesma data-com (dividendo e JCP pagos juntos). O
+yield desse total usa o bruto; o caixa recebido retém 15% só na parte de JCP.
+Um mesmo R$/ação só é duplicata se a data-com for a mesma, ou se o aviso
+anterior ainda não tinha data-com e for o mesmo anúncio. JCP trimestral de
+valor fixo e parcelas iguais com data-com diferente continuam eventos novos.
+Se o PDF fala em várias parcelas e a tabela não fecha, o aviso fica em conferir valor.
+Se a data-com não saiu do PDF, o alerta de compra avisa que a saída e o
+direito ainda não estão confirmados.
 
 ## Regras (não alterar)
 
 1. Gatilho: dividendo ou JCP tornado público na CVM (aviso ou ata).
-2. Rendimento entre 2% e 30% sobre o fechamento de entrada (o mesmo pregão da
-   compra). No JCP o rendimento usa o valor bruto; o alerta mostra também o
+2. Rendimento de 2% inclusive até menos de 30% sobre o fechamento de entrada
+   (o mesmo pregão da compra). 30% exato não passa, como no backtest (`y < 0,30`).
+   No JCP o rendimento usa o valor bruto; o alerta mostra também o
    líquido (15% retido). Se esse fechamento ainda não saiu, o alerta usa o
-   último disponível e rotula a data.
+   último disponível e rotula a data. O resultado acumulado ignora custos,
+   impostos e o CDI do caixa parado.
 3. Volume financeiro médio de 60 pregões de pelo menos R$ 1 milhão.
 4. Compra no fechamento do primeiro pregão depois do anúncio. O alerta tem de
    chegar antes desse call.

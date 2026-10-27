@@ -277,7 +277,13 @@ def _prose_hits(flat: str, document_kind: str) -> list[Distribution]:
         if not _accept(value):
             continue
         before = flat[max(0, match.start() - 64) : match.start()]
-        share_class = _share_class(match.group(0) + " " + flat[match.end() : match.end() + 30])
+        # A espécie pode vir logo depois de "por ação", mas não pode atravessar
+        # o R$ seguinte — senão a ordinária herda "preferencial" da frase ao lado.
+        tail = flat[match.end() : match.end() + 40]
+        nxt = tail.find("r$")
+        if nxt >= 0:
+            tail = tail[:nxt]
+        share_class = _share_class(match.group(0) + " " + tail)
         # O papel (bruto/líquido) olha só as palavras coladas no número.
         # O tipo olha mais atrás, para achar "dividendo" ou "juros sobre".
         raw.append(

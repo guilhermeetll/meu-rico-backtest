@@ -12,7 +12,12 @@ from alertas_dividendo.calendar import TZ, Calendar
 from alertas_dividendo.config import Config
 from alertas_dividendo.cvm_parse import is_aviso_ou_ata, relevant
 from alertas_dividendo.decide import Prior, Snapshot, decide
-from alertas_dividendo.extract import Distribution, combine_same_record_date, extract_distributions
+from alertas_dividendo.extract import (
+    Distribution,
+    combine_same_record_date,
+    extract_distributions,
+    parse_br_number,
+)
 from alertas_dividendo.messages import (
     buy_message,
     captcha_message,
@@ -29,6 +34,7 @@ from alertas_dividendo.sources import (
     download_pdf,
     enet_paused,
     fetch_b3_dividends,
+    fetch_b3_splits,
     fetch_enet,
     fetch_ipe,
     fetch_issuers,
@@ -96,12 +102,27 @@ def _ex_date(stated: date | None, data_com: date | None, calendar: Calendar) -> 
     return None
 
 
+def _counts_for_liquidity(row) -> bool:
+    """Volume do Yahoo (em geral 0) não entra na média de 60 pregões.
+
+    O fechamento do Yahoo ainda pode ser o preço. O volume oficial chega
+    depois, no COTAHIST, e substitui a linha.
+    """
+    source = str(row["source"] or "")
+    if source.startswith("Yahoo"):
+        return False
+    volume = float(row["volume"])
+    if volume <= 0 and source != "COTAHIST":
+        return False
+    return True
+
+
 def _snapshot_from_rows(rows) -> Snapshot:
     if not rows:
         return Snapshot(None, None, None, None, 0)
     from alertas_dividendo.strategy import average_volume
 
-    volumes = [float(row["volume"]) for row in rows]
+    volumes = [float(row["volume"]) for row in rows if _counts_for_liquidity(row)]
     average, count = average_volume(volumes)
     last = rows[-1]
     return Snapshot(
@@ -192,9 +213,8 @@ def _cross_check(issuer: str, data_com: date, gross: float, kind: str) -> str | 
         if (item.get("lastDatePrior") or "") != target:
             continue
         rate_raw = str(item.get("rate") or "").strip()
-        try:
-            rate = float(rate_raw.replace(".", "").replace(",", ".")) if "," in rate_raw else float(rate_raw)
-        except ValueError:
+        rate = _b3_number(rate_raw)
+        if rate is None:
             continue
         label = (item.get("label") or "").upper()
         notes = []
@@ -236,9 +256,7 @@ def _b3_number(raw: object) -> float | None:
     if not text:
         return None
     try:
-        if "," in text:
-            text = text.replace(".", "").replace(",", ".")
-        value = float(text)
+        value = parse_br_number(text)
     except ValueError:
         return None
     if value <= 0:
@@ -492,6 +510,7 @@ def _priors(store: Store, ticker: str) -> list[Prior]:
                 gross=float(row["gross_per_share"]),
                 data_com=date.fromisoformat(row["data_com"]) if row["data_com"] else None,
                 kind=row["kind"],
+                approval=date.fromisoformat(row["approval_date"]) if row["approval_date"] else None,
             )
         )
     return priors
@@ -682,7 +701,7 @@ def _emit_ticker(
         store.log_event(decision.reason, ticker=ticker, protocol=decision_doc["protocol"], detail=line)
         return False
     if decision.action == "atualizar":
-        _apply_update(cfg, store, report, ticker, data_com, data_ex, decision, decision_doc)
+        _apply_update(cfg, store, report, ticker, data_com, data_ex, decision, decision_doc, approval)
         return False
     if decision.action == "conferir_valor":
         signal_key = _signal_key(ticker, kind, None, data_com, approval, decision_doc["protocol"])
@@ -849,16 +868,23 @@ def _insert_signal(store, cfg, ticker, company, issuer, kind, gross, net, decisi
     )
 
 
-def _apply_update(cfg, store, report, ticker, data_com, data_ex, decision, doc) -> None:
+def _apply_update(cfg, store, report, ticker, data_com, data_ex, decision, doc, approval) -> None:
     if data_com is None or decision.exit_date is None:
         return
+    if approval is None:
+        approval_clause = "AND approval_date IS NULL"
+        params: tuple = (ticker,)
+    else:
+        approval_clause = "AND approval_date=?"
+        params = (ticker, approval.isoformat())
     rows = store.conn.execute(
-        """
+        f"""
         SELECT * FROM signals
         WHERE ticker=? AND status IN ('aguardando_compra','aberta') AND data_com IS NULL
+        {approval_clause}
         ORDER BY id DESC LIMIT 1
         """,
-        (ticker,),
+        params,
     ).fetchall()
     body = update_dates_message(
         ticker=ticker,
@@ -885,9 +911,81 @@ def _apply_update(cfg, store, report, ticker, data_com, data_ex, decision, doc) 
     _queue(cfg, store, report, f"data_com|{signal['id']}|{data_com.isoformat()}", "data_com", signal["id"], body)
 
 
+def _split_matches(item: dict, ticker: str) -> bool:
+    asset = str(item.get("assetIssued") or item.get("tradingName") or "").strip().upper()
+    if asset:
+        return asset == ticker.upper()
+    stock = str(item.get("typeStock") or "").strip()
+    if not stock:
+        return False
+    return _b3_matches_ticker(item, ticker)
+
+
+def split_during_position(rows: list[dict], *, ticker: str, start: date, end: date) -> dict | None:
+    """Desdobramento ou grupamento com o último dia dentro da posição.
+
+    Não ajusta preço. Quem chama só registra o aviso.
+    """
+    found: dict | None = None
+    for item in rows:
+        label = str(item.get("label") or item.get("corporateAction") or "")
+        folded = label.upper()
+        if "DESDOBR" not in folded and "GRUPAMENT" not in folded:
+            continue
+        if not _split_matches(item, ticker):
+            continue
+        record = _b3_date(item.get("lastDatePrior")) or _b3_date(item.get("approvedOn"))
+        if record is None or record < start or record > end:
+            continue
+        found = {
+            "date": record,
+            "label": label.strip() or folded,
+            "factor": str(item.get("factor") or "").strip(),
+        }
+    return found
+
+
+def _corporate_action_note(store: Store, position) -> str | None:
+    signal = store.signal_by_id(position["signal_id"]) if position["signal_id"] else None
+    protocol = (signal["protocol"] if signal else "") or ""
+    return store.latest_event("desdobramento", position["ticker"], protocol)
+
+
+def _flag_split(cfg: Config, store: Store, report: Report, position) -> None:
+    """Marca desdobramento ou grupamento no meio da posição. O preço fica como está."""
+    if position["status"] != "aberta" or not position["entry_date"]:
+        return
+    signal = store.signal_by_id(position["signal_id"])
+    if signal is None:
+        return
+    issuer = signal["issuer"] or ""
+    protocol = signal["protocol"] or ""
+    if not issuer or store.seen_event("desdobramento", position["ticker"], protocol):
+        return
+    entry = date.fromisoformat(position["entry_date"])
+    end = date.fromisoformat(position["exit_date"]) if position["exit_date"] else aware(cfg.now).date()
+    try:
+        rows = fetch_b3_splits(issuer)
+    except Exception as exc:
+        log.info("consulta de desdobramento de %s falhou: %s", issuer, exc)
+        return
+    found = split_during_position(rows, ticker=position["ticker"], start=entry, end=end)
+    if found is None:
+        return
+    factor = f", fator {found['factor']}" if found["factor"] else ""
+    detail = (
+        f"{position['ticker']} {found['label']} com último dia {found['date'].strftime('%d/%m/%Y')}"
+        f"{factor}. O preço da posição não foi ajustado."
+    )
+    store.log_event("desdobramento", ticker=position["ticker"], protocol=protocol, detail=detail)
+    report.ignore(detail)
+    log.info(detail)
+
+
 def _advance(cfg: Config, store: Store, calendar: Calendar, report: Report, *, reminders_only: bool) -> None:
     now = aware(cfg.now)
     for position in store.positions_active():
+        _flag_split(cfg, store, report, position)
         status = position["status"]
         entry_date = date.fromisoformat(position["entry_date"]) if position["entry_date"] else None
         if status == "aguardando_compra" and entry_date is not None:
@@ -917,6 +1015,7 @@ def _advance(cfg: Config, store: Store, calendar: Calendar, report: Report, *, r
                 data_com=data_com,
                 reminder=False,
                 simulacao=cfg.simulacao,
+                corporate_action=_corporate_action_note(store, position),
             )
             _queue(cfg, store, report, f"saida|{position['id']}|{exit_date.isoformat()}", "saida", signal["id"], body)
         if calendar.near_close(now, exit_date):
@@ -926,6 +1025,7 @@ def _advance(cfg: Config, store: Store, calendar: Calendar, report: Report, *, r
                 data_com=date.fromisoformat(position["data_com"]) if position["data_com"] else None,
                 reminder=True,
                 simulacao=cfg.simulacao,
+                corporate_action=_corporate_action_note(store, position),
             )
             _queue(cfg, store, report, f"lembrete|{position['id']}|{exit_date.isoformat()}", "lembrete", position["signal_id"], body)
         if status == "aberta" and position["entry_price"] is not None:
@@ -988,6 +1088,7 @@ def _close_position(cfg, store, report, position, filled_exit: tuple[float, str]
         cumulative=cumulative,
         closed_trades=len(returns),
         simulacao=cfg.simulacao,
+        corporate_action=_corporate_action_note(store, position),
     )
     mismatch = None
     signal = store.signal_by_id(position["signal_id"])

@@ -16,6 +16,7 @@ CAL = Calendar()
 @pytest.fixture(autouse=True)
 def _no_live_b3(monkeypatch):
     monkeypatch.setattr("alertas_dividendo.engine.fetch_b3_dividends", lambda _issuer: [])
+    monkeypatch.setattr("alertas_dividendo.engine.fetch_b3_splits", lambda _issuer: [])
 
 
 def _cfg(folder, moment: datetime, *, dry_run: bool) -> Config:
@@ -563,3 +564,228 @@ def test_b3_match_waits_until_the_record_date():
         today=date(2026, 10, 30),
     )
     assert found == [{"data_com": date(2026, 10, 30), "value": 0.5, "label": "DIVIDENDO"}]
+
+
+def test_cross_check_uses_parse_br_number(monkeypatch):
+    from alertas_dividendo.engine import _b3_number, _cross_check
+
+    assert _b3_number("1 234,56") == 1234.56
+    assert _b3_number("0.03781618347") == 0.03781618347
+    monkeypatch.setattr(
+        "alertas_dividendo.engine.fetch_b3_dividends",
+        lambda _issuer: [{"lastDatePrior": "30/10/2026", "rate": "1.234,56", "label": "DIVIDENDO"}],
+    )
+    note = _cross_check("ZZZZ", date(2026, 10, 30), 0.50, "dividendo")
+    assert note is not None and "1.234,56" in note
+
+
+def test_same_jcp_in_another_quarter_is_not_a_duplicate(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 6, 15, 18, 0, tzinfo=TZ)
+    text = (
+        "Aprovar o pagamento de juros sobre o capital próprio no valor de R$ 0,50 por ação. "
+        "Farão jus os detentores de ações em 30 de junho de 2026."
+    )
+    _seed(store, "9003", text, published)
+    store.insert_signal(
+        {
+            "dedupe_key": "jcp-marco",
+            "protocol": "100",
+            "ticker": "ZZZZ3",
+            "issuer": "ZZZZ",
+            "status": "encerrada",
+            "kind": "jcp",
+            "gross_per_share": 0.50,
+            "data_com": "2026-03-31",
+            "approval_date": "2026-03-12",
+            "created_at": "2026-03-12T18:00:00-03:00",
+        }
+    )
+    store.insert_signal(
+        {
+            "dedupe_key": "jcp-sem-data",
+            "protocol": "101",
+            "ticker": "ZZZZ3",
+            "issuer": "ZZZZ",
+            "status": "aguardando_compra",
+            "kind": "jcp",
+            "gross_per_share": 0.50,
+            "approval_date": "2026-03-12",
+            "created_at": "2026-03-12T18:00:00-03:00",
+        }
+    )
+    store.commit()
+    cfg = _cfg(tmp_path, datetime(2026, 6, 15, 19, 0, tzinfo=TZ), dry_run=False)
+    try:
+        report = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, report)
+        assert not any("duplicado" in line for line in report.ignored)
+        fresh = store.conn.execute(
+            "SELECT data_com, status FROM signals WHERE protocol='9003'"
+        ).fetchone()
+        assert fresh["data_com"] == "2026-06-30"
+        assert fresh["status"] == "aguardando_compra"
+        old = store.conn.execute(
+            "SELECT data_com FROM signals WHERE protocol='101'"
+        ).fetchone()
+        assert old["data_com"] is None
+        assert len(sent) == 1
+    finally:
+        store.close()
+
+
+def test_undated_notice_does_not_collapse_into_an_older_quarter(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 6, 15, 18, 0, tzinfo=TZ)
+    text = "Aprovar o pagamento de juros sobre o capital próprio no valor de R$ 0,50 por ação."
+    _seed(store, "9004", text, published)
+    store.insert_signal(
+        {
+            "dedupe_key": "jcp-marco",
+            "protocol": "100",
+            "ticker": "ZZZZ3",
+            "issuer": "ZZZZ",
+            "status": "encerrada",
+            "kind": "jcp",
+            "gross_per_share": 0.50,
+            "data_com": "2026-03-31",
+            "approval_date": "2026-03-12",
+            "created_at": "2026-03-12T18:00:00-03:00",
+        }
+    )
+    store.commit()
+    cfg = _cfg(tmp_path, datetime(2026, 6, 15, 19, 0, tzinfo=TZ), dry_run=False)
+    try:
+        report = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, report)
+        assert not any("duplicado" in line for line in report.ignored)
+        fresh = store.conn.execute(
+            "SELECT data_com, status FROM signals WHERE protocol='9004'"
+        ).fetchone()
+        assert fresh["status"] == "aguardando_compra"
+        assert fresh["data_com"] is None
+        assert len(sent) == 1
+        assert "ATENÇÃO: a data-com não é conhecida antes desta compra" in sent[0]
+    finally:
+        store.close()
+
+
+def test_yahoo_zero_volume_does_not_block_cotahist_or_the_average(tmp_path, monkeypatch):
+    from alertas_dividendo.cotahist import build_quote_line
+    from alertas_dividendo.engine import _snapshot_from_rows
+    from alertas_dividendo.quotes import ensure_cotahist
+
+    store = Store(tmp_path / "alertas.sqlite")
+    day = date(2026, 10, 21)
+    cursor = day - timedelta(days=1)
+    rows = []
+    while len(rows) < 60:
+        if CAL.is_session(cursor):
+            rows.append(("SAUD3", cursor.isoformat(), 10.0, 2_000_000.0, "COTAHIST"))
+        cursor -= timedelta(days=1)
+    rows.append(("SAUD3", day.isoformat(), 15.42, 0.0, "Yahoo Finance"))
+    store.insert_quotes_if_absent(rows)
+    store.mark_file("D" + day.strftime("%Y%m%d"))
+    try:
+        snap = _snapshot_from_rows(store.history("SAUD3", day.isoformat()))
+        assert snap.volume_sessions == 60
+        assert snap.avg_volume == 2_000_000
+        assert snap.last_close == 15.42
+        assert str(snap.last_close_source).startswith("Yahoo")
+        downloaded = []
+
+        def fake(name):
+            downloaded.append(name)
+            return build_quote_line(day.strftime("%Y%m%d"), "SAUD3", 15.50, 5_000_000.0) + "\n"
+
+        monkeypatch.setattr("alertas_dividendo.quotes._download", fake)
+        ensure_cotahist(store, CAL, day, day)
+        assert any(day.strftime("%d%m%Y") in name for name in downloaded)
+        stored = store.conn.execute(
+            "SELECT close, volume, source FROM quotes WHERE ticker='SAUD3' AND session_date=?",
+            (day.isoformat(),),
+        ).fetchone()
+        assert stored["source"] == "COTAHIST"
+        assert stored["close"] == 15.50
+        assert stored["volume"] == 5_000_000.0
+        again = _snapshot_from_rows(store.history("SAUD3", day.isoformat()))
+        assert again.volume_sessions == 60
+        assert again.avg_volume == (2_000_000 * 59 + 5_000_000) / 60
+        assert again.last_close_source == "COTAHIST"
+    finally:
+        store.close()
+
+
+def test_split_during_position_is_flagged_and_the_price_stays(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "alertas_dividendo.engine.fetch_b3_splits",
+        lambda _issuer: [
+            {
+                "assetIssued": "ZZZZ4",
+                "label": "GRUPAMENTO",
+                "lastDatePrior": "15/10/2026",
+                "factor": "10",
+            },
+            {
+                "assetIssued": "ZZZZ3",
+                "label": "DESDOBRAMENTO",
+                "lastDatePrior": "15/10/2026",
+                "factor": "2",
+            },
+        ],
+    )
+    store = Store(tmp_path / "alertas.sqlite")
+    try:
+        signal_id = store.insert_signal(
+            {
+                "dedupe_key": "split-1",
+                "protocol": "split-1",
+                "ticker": "ZZZZ3",
+                "issuer": "ZZZZ",
+                "status": "aberta",
+                "kind": "dividendo",
+                "gross_per_share": 0.5,
+                "data_com": "2026-10-05",
+                "created_at": "2026-10-01T18:00:00-03:00",
+            }
+        )
+        store.insert_position(
+            {
+                "signal_id": signal_id,
+                "ticker": "ZZZZ3",
+                "status": "aberta",
+                "entry_date": "2026-10-02",
+                "entry_price": 10.0,
+                "entry_source": "COTAHIST",
+                "exit_date": "2026-10-22",
+                "data_com": "2026-10-05",
+                "kind": "dividendo",
+                "gross_per_share": 0.5,
+                "opened_at": "2026-10-02T18:00:00-03:00",
+            }
+        )
+        store.insert_quotes_if_absent([("ZZZZ3", "2026-10-22", 11.0, 2_000_000.0, "COTAHIST")])
+        store.commit()
+        mid = _cfg(tmp_path, datetime(2026, 10, 15, 18, 0, tzinfo=TZ), dry_run=True)
+        _advance(mid, store, CAL, Report(now=mid.now, dry_run=True), reminders_only=False)
+        note = store.latest_event("desdobramento", "ZZZZ3", "split-1")
+        assert note is not None and "DESDOBRAMENTO" in note and "não foi ajustado" in note
+        assert "GRUPAMENTO" not in note
+        _advance(mid, store, CAL, Report(now=mid.now, dry_run=True), reminders_only=False)
+        assert store.conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE reason='desdobramento'"
+        ).fetchone()["n"] == 1
+        closing = _cfg(tmp_path, datetime(2026, 10, 22, 17, 5, tzinfo=TZ), dry_run=True)
+        report = Report(now=closing.now, dry_run=True)
+        _advance(closing, store, CAL, report, reminders_only=False)
+        body = "\n".join(report.messages)
+        assert "RESULTADO" in body
+        assert "não foi ajustado" in body
+        assert store.conn.execute("SELECT entry_price, exit_price FROM positions").fetchone()["entry_price"] == 10.0
+        assert store.conn.execute("SELECT exit_price FROM positions").fetchone()["exit_price"] is None
+    finally:
+        store.close()

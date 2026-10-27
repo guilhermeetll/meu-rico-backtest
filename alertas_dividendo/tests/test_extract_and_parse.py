@@ -140,7 +140,44 @@ def test_same_record_date_dividend_and_jcp_are_summed():
     assert len(found) == 1
     assert found[0].kind == "misto"
     assert abs(found[0].gross - 0.20) < 1e-12
+    assert abs(found[0].net - (0.12 + 0.08 * 0.85)) < 1e-12
     assert found[0].data_com == date(2026, 10, 30)
+
+
+CLASSES = """
+Aprovaram dividendos de R$ 0,50 por ação ordinária, R$ 0,40 por ação preferencial
+e R$ 0,90 por unit.
+Farão jus os detentores de ações em 30 de outubro de 2026.
+"""
+
+CLASS_TABLE = """
+Data de Corte
+30/10/2026
+03/11/2026
+30/11/2026
+0,50000000000
+0,40000000000
+0,90000000000
+"""
+
+
+def test_on_pn_and_units_keep_their_own_values():
+    prose = {
+        "PETR3": 0.50,
+        "PETR4": 0.40,
+        "TAEE11": 0.90,
+        "SANB11": 0.90,
+    }
+    for ticker, gross in prose.items():
+        found = extract_distributions(CLASSES, ticker=ticker, published=date(2026, 10, 21))
+        assert len(found) == 1, ticker
+        assert abs(found[0].gross - gross) < 1e-12, ticker
+        assert found[0].data_com == date(2026, 10, 30)
+    table = {"PETR3": 0.50, "PETR4": 0.40, "TAEE11": 0.90, "SANB11": 0.90}
+    for ticker, gross in table.items():
+        found = extract_distributions(CLASS_TABLE, ticker=ticker, published=date(2026, 10, 21))
+        assert len(found) == 1, ticker
+        assert abs(found[0].gross - gross) < 1e-12, ticker
 
 
 GARBLED_INSTALLMENTS = """
@@ -262,3 +299,33 @@ def test_messages_carry_simulacao_and_jcp_net():
     )
     assert "SIMULAÇÃO" not in hidden
     assert "JCP líquido" in hidden
+    assert "ignora custos, impostos e o CDI" in hidden
+    missing_com = buy_message(
+        ticker="SAUD3",
+        company="BRADSAUDE S.A.",
+        kind="dividendo",
+        gross=0.34,
+        net=None,
+        yld=0.022,
+        last_close=15.42,
+        last_close_date=date(2026, 10, 21),
+        last_close_source="COTAHIST",
+        approval=date(2026, 10, 21),
+        published_at=datetime(2026, 10, 21, 17, 37, tzinfo=TZ),
+        time_known=True,
+        timing="apos_fechamento",
+        reference_close_date=date(2026, 10, 22),
+        reference_close_used=False,
+        data_com=None,
+        data_ex=None,
+        buy_date=date(2026, 10, 22),
+        exit_date=None,
+        url="https://www.rad.cvm.gov.br/exemplo",
+        protocol="1579113",
+        slot_number=1,
+        late=False,
+        entry_price=None,
+        entry_source=None,
+        simulacao=True,
+    )
+    assert "ATENÇÃO: a data-com não é conhecida antes desta compra" in missing_com

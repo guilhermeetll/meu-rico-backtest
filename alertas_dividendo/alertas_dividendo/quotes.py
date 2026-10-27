@@ -1,4 +1,8 @@
-"""Cotações: COTAHIST (oficial) e Yahoo só quando o arquivo do dia ainda não saiu."""
+"""Cotações: COTAHIST (oficial) e Yahoo só quando o arquivo do dia ainda não saiu.
+
+Um fechamento do Yahoo não conta como o pregão oficial. O arquivo diário
+continua sendo baixado, e o volume zero do Yahoo não substitui o COTAHIST.
+"""
 
 from __future__ import annotations
 
@@ -79,8 +83,11 @@ def ensure_cotahist(store: Store, calendar: Calendar, start: date, end: date) ->
         log.info("%s: %s barras", name, count)
     for day in sessions:
         key = "D" + day.strftime("%Y%m%d")
-        if store.file_done(key) or store.has_session(day.isoformat()):
-            store.mark_file(key)
+        # Presença por arquivo e por fonte. Uma linha do Yahoo (volume 0)
+        # não trava o ZIP do dia, mesmo se um bug antigo marcou o arquivo.
+        if store.has_session_source(day.isoformat(), "COTAHIST"):
+            if not store.file_done(key):
+                store.mark_file(key)
             continue
         name = "COTAHIST_D" + day.strftime("%d%m%Y") + ".ZIP"
         text = _download(name)

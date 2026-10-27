@@ -366,6 +366,24 @@ class Store:
         ).fetchone()
         return row is not None
 
+    def has_session_source(self, session: str, source: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM quotes WHERE session_date=? AND source=? LIMIT 1",
+            (session, source),
+        ).fetchone()
+        return row is not None
+
+    def latest_event(self, reason: str, ticker: str, protocol: str) -> str | None:
+        row = self.conn.execute(
+            """
+            SELECT detail FROM events
+            WHERE reason=? AND ticker=? AND protocol=?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (reason, ticker, protocol),
+        ).fetchone()
+        return None if row is None else row["detail"]
+
     def close_on(self, ticker: str, session: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT close, source FROM quotes WHERE ticker=? AND session_date=?",

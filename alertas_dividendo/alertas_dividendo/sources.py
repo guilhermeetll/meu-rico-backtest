@@ -160,16 +160,26 @@ def fetch_issuers() -> list[tuple[str, str, str]]:
     return rows
 
 
-def fetch_b3_dividends(issuer: str) -> list[dict]:
-    """Proventos que a B3 já lista. Em geral só aparecem depois da data-com."""
+def fetch_b3_supplement(issuer: str) -> dict:
+    """Caderno da B3: proventos em dinheiro e eventos em ações."""
     url = B3_SUPPLEMENT.format(token=_b3_token({"issuingCompany": issuer, "language": "pt-br"}))
     raw = json.loads(get(url, timeout=40, headers={"Accept": "application/json"}))
     if isinstance(raw, str):
         raw = json.loads(raw)
     block = raw[0] if isinstance(raw, list) and raw else raw
     if not isinstance(block, dict):
-        return []
-    return list(block.get("cashDividends") or [])
+        return {}
+    return block
+
+
+def fetch_b3_dividends(issuer: str) -> list[dict]:
+    """Proventos que a B3 já lista. Em geral só aparecem depois da data-com."""
+    return list(fetch_b3_supplement(issuer).get("cashDividends") or [])
+
+
+def fetch_b3_splits(issuer: str) -> list[dict]:
+    """Desdobramentos e grupamentos. A lista também traz bonificações."""
+    return list(fetch_b3_supplement(issuer).get("stockDividends") or [])
 
 
 def download_pdf(url: str) -> bytes:

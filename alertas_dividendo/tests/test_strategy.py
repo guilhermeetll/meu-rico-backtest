@@ -16,6 +16,7 @@ from alertas_dividendo.strategy import (
     cumulative_result,
     dividend_received,
     exit_session,
+    has_rights,
     index_return,
     jcp_net,
     last_close_session,
@@ -44,9 +45,10 @@ def test_jcp_yield_uses_gross_and_net_is_15_percent():
     assert dividend_received("jcp", gross, net, entry=_d(2026, 10, 22), data_com=_d(2026, 10, 30)) == net
 
 
-def test_yield_band_includes_2_and_30_percent():
+def test_yield_band_includes_2_percent_and_excludes_30():
     assert classify_yield(0.02) == "ok"
-    assert classify_yield(0.30) == "ok"
+    assert classify_yield(0.2999) == "ok"
+    assert classify_yield(0.30) == "yield_acima"
     assert classify_yield(0.0199) == "yield_abaixo"
     assert classify_yield(0.3001) == "yield_acima"
 
@@ -120,6 +122,39 @@ def test_exit_reminder_follows_the_call_including_ash_wednesday():
     regular = _d(2026, 10, 22)
     assert CAL.near_close(_at(2026, 10, 22, 15, 59), regular) is False
     assert CAL.near_close(_at(2026, 10, 22, 16, 0), regular) is True
+
+
+def test_notice_at_1655_and_1700_and_on_a_holiday_buys_the_next_session():
+    """16:55 ainda é pregão, 17:00 já é depois do call. Os dois compram o dia seguinte."""
+    at_call = buy_plan(_at(2026, 10, 21, 16, 55), True, CAL)
+    at_close = buy_plan(_at(2026, 10, 21, 17, 0), True, CAL)
+    assert at_call.timing == "durante_pregao"
+    assert at_close.timing == "apos_fechamento"
+    assert at_call.buy_date == _d(2026, 10, 22)
+    assert at_close.buy_date == _d(2026, 10, 22)
+    assert at_call.deadline == at_close.deadline == _at(2026, 10, 22, 16, 55)
+    holiday = buy_plan(_at(2026, 11, 2, 11, 0), True, CAL)
+    assert holiday.timing == "dia_sem_pregao"
+    assert holiday.buy_date == _d(2026, 11, 3)
+    # Cinzas: 17:00 ainda é pregão (fecha 18:00). 18:00 compra o dia seguinte.
+    ash_open = buy_plan(_at(2026, 2, 18, 17, 0), True, CAL)
+    ash_close = buy_plan(_at(2026, 2, 18, 18, 0), True, CAL)
+    assert ash_open.timing == "durante_pregao"
+    assert ash_close.timing == "apos_fechamento"
+    assert ash_open.buy_date == ash_close.buy_date == _d(2026, 2, 19)
+    assert ash_open.deadline == _at(2026, 2, 19, 16, 55)
+
+
+def test_record_date_on_christmas_eve_or_a_holiday_is_not_a_session():
+    from alertas_dividendo.engine import _session_or_keep
+
+    assert not CAL.is_session(_d(2026, 12, 24))
+    assert _session_or_keep(_d(2026, 12, 24), CAL) == _d(2026, 12, 23)
+    assert exit_session(_d(2026, 12, 24), CAL) == exit_session(_d(2026, 12, 23), CAL)
+    assert has_rights(_d(2026, 12, 23), _session_or_keep(_d(2026, 12, 24), CAL))
+    assert not CAL.is_session(_d(2026, 11, 2))
+    assert _session_or_keep(_d(2026, 11, 2), CAL) == _d(2026, 10, 30)
+    assert exit_session(_d(2026, 11, 2), CAL) == CAL.add_sessions(_d(2026, 10, 30), 20)
 
 
 def test_date_only_and_holiday_and_ash_wednesday_clock():
@@ -204,7 +239,7 @@ def test_dedupe_same_cash_event_and_data_com_update():
         category_is_aviso_ou_ata=True,
         snapshot=snap,
         open_positions=1,
-        priors=[Prior(0.342059542, None, "dividendo")],
+        priors=[Prior(0.342059542, None, "dividendo", _d(2026, 10, 21))],
         calendar=CAL,
     )
     assert again.action == "atualizar"
@@ -220,10 +255,72 @@ def test_dedupe_same_cash_event_and_data_com_update():
         category_is_aviso_ou_ata=True,
         snapshot=snap,
         open_positions=1,
-        priors=[Prior(0.342059542, _d(2026, 10, 30), "dividendo")],
+        priors=[Prior(0.342059542, _d(2026, 10, 30), "dividendo", _d(2026, 10, 21))],
         calendar=CAL,
     )
     assert duplicate.action == "ignorar" and duplicate.reason == "duplicado"
+    assert not same_cash_event(0.0378, 0.040)
+    assert same_cash_event(0.342059542, 0.34206)
+
+
+def _cash(gross, data_com, approval, kind="dividendo", *, price=1.0, published=None):
+    moment = published or _at(2026, 10, 15, 18, 0)
+    return dict(
+        ticker="MTRE3",
+        kind=kind,
+        gross=gross,
+        data_com=data_com,
+        approval=approval,
+        published_at=moment,
+        time_known=True,
+        category_is_aviso_ou_ata=True,
+        snapshot=Snapshot(price, moment.date(), "COTAHIST", 2_000_000, 60),
+        open_positions=0,
+        calendar=CAL,
+    )
+
+
+def test_equal_installments_and_quarterly_jcp_are_not_duplicates():
+    approval = _d(2026, 10, 15)
+    first = Prior(0.03781618347, _d(2026, 10, 20), "dividendo", approval)
+    second = decide(
+        **_cash(0.03781618347, _d(2026, 11, 13), approval),
+        priors=[first],
+    )
+    assert second.action == "comprar"
+    assert second.reason == "ok"
+    # Mesmo valor, outro trimestre: outro anúncio e outra data-com.
+    june_at = _at(2026, 6, 15, 18, 0)
+    march = Prior(0.50, _d(2026, 3, 31), "jcp", _d(2026, 3, 12))
+    june = decide(
+        **_cash(0.50, _d(2026, 6, 30), _d(2026, 6, 15), kind="jcp", price=10.0, published=june_at),
+        priors=[march],
+    )
+    assert june.action == "comprar"
+    # Sem data-com no aviso novo, o trimestre antigo com data não o engole.
+    undated = decide(
+        **_cash(0.50, None, _d(2026, 6, 15), kind="jcp", price=10.0, published=june_at),
+        priors=[march],
+    )
+    assert undated.reason != "duplicado"
+    assert undated.action == "comprar"
+    # Dois avisos sem data-com só são o mesmo evento se a aprovação coincidir.
+    same_notice = decide(
+        **_cash(0.50, None, _d(2026, 6, 15), kind="jcp", price=10.0, published=june_at),
+        priors=[Prior(0.50, None, "jcp", _d(2026, 6, 15))],
+    )
+    assert same_notice.reason == "duplicado"
+    other_quarter = decide(
+        **_cash(0.50, None, _d(2026, 6, 15), kind="jcp", price=10.0, published=june_at),
+        priors=[Prior(0.50, None, "jcp", _d(2026, 3, 12))],
+    )
+    assert other_quarter.action == "comprar"
+    # R$ 0,0378 e R$ 0,040 na mesma data-com não se fundem.
+    near = decide(
+        **_cash(0.040, _d(2026, 10, 20), approval),
+        priors=[Prior(0.0378, _d(2026, 10, 20), "dividendo", approval)],
+    )
+    assert near.action == "comprar"
 
 
 def test_saud3_decision_matches_the_frozen_trade():
@@ -286,6 +383,10 @@ def test_trade_result_and_cumulative_slot_math():
     result = trade_return(entry, exit_price, dividend)
     assert result == (exit_price - entry + dividend) / entry
     assert dividend_received("dividendo", dividend, None, _d(2026, 10, 22), _d(2026, 10, 30)) == dividend
+    # Misto: 0,12 de dividendo + 0,08 de JCP. O caixa retém 15% só no JCP.
+    mixed_net = 0.12 + 0.08 * 0.85
+    assert dividend_received("misto", 0.20, mixed_net, _d(2026, 10, 22), _d(2026, 10, 30)) == mixed_net
+    assert yield_ratio(0.20, 10) == 0.02
     assert dividend_received("dividendo", dividend, None, _d(2026, 11, 3), _d(2026, 10, 30)) == 0
     assert abs(index_return(200_000, 210_000) - 0.05) < 1e-12
     # Dois trades, +10% e -5%, cada um com 10% do capital.

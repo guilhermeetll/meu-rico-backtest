@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from alertas_dividendo.calendar import TZ, Calendar
 
 MIN_YIELD = 0.02
-MAX_YIELD = 0.30  # inclusive; o backtest usava y < 0.30
+MAX_YIELD = 0.30  # exclusivo: o backtest filtra y < 0.30
 MIN_AVG_VOLUME = 1_000_000.0
 VOLUME_SESSIONS = 60
 SESSIONS_AFTER_COM = 20
@@ -53,10 +53,10 @@ def yield_ratio(gross_per_share: float, last_close: float) -> float:
 
 
 def classify_yield(value: float) -> str:
-    """`ok`, `yield_abaixo` ou `yield_acima`. 2% e 30% passam."""
+    """`ok`, `yield_abaixo` ou `yield_acima`. 2% passa. 30% não: y < 0,30."""
     if value < MIN_YIELD:
         return "yield_abaixo"
-    if value > MAX_YIELD:
+    if value >= MAX_YIELD:
         return "yield_acima"
     return "ok"
 
@@ -98,9 +98,10 @@ def buy_plan(
 ) -> BuyPlan:
     """Fechamento do primeiro pregão depois da data de publicação.
 
-    A hora (durante o pregão, depois do call, antes da abertura, dia sem
-    pregão ou fonte sem hora) fica em `timing` só para o log. A compra é
-    sempre o pregão seguinte. Compra no mesmo dia não foi testada.
+    16:55 ainda é durante o pregão, 17:00 já é depois do call, feriado é dia sem
+    pregão e a Quarta de Cinzas fecha às 18:00. Em todos esses casos a compra
+    é o pregão seguinte. `timing` fica só no log e na mensagem. Compra no
+    mesmo dia não foi testada.
     """
     if isinstance(published_at, datetime):
         local = published_at.astimezone(TZ) if published_at.tzinfo else published_at.replace(tzinfo=TZ)
@@ -168,11 +169,17 @@ def slots_left(open_positions: int, limit: int = MAX_POSITIONS) -> int:
 
 
 def dividend_received(kind: str, gross: float, net: float | None, entry: date, data_com: date | None) -> float:
-    """Provento que entra no retorno. JCP entra líquido. Sem direito, zero."""
+    """Provento que entra no retorno. JCP entra líquido. Sem direito, zero.
+
+    No misto, `net` já é o dividendo integral mais o JCP depois dos 15%.
+    O yield continua no bruto somado.
+    """
     if data_com is None or not has_rights(entry, data_com):
         return 0.0
     if kind == "jcp":
         return net if net is not None else jcp_net(gross)
+    if kind == "misto" and net is not None:
+        return net
     return gross
 
 
@@ -201,10 +208,13 @@ def cumulative_result(trade_returns: list[float], slot: float = SLOT_WEIGHT) -> 
 
 
 def same_cash_event(gross_a: float, gross_b: float) -> bool:
-    """Dois documentos com o mesmo R$/ação (aviso e ata) são um evento só."""
-    diff = abs(gross_a - gross_b)
+    """Dois documentos com o mesmo R$/ação (aviso e ata) são um evento só.
+
+    Só tolerância relativa de 1%. R$ 0,005 de diferença absoluta juntava
+    R$ 0,0378 e R$ 0,040, que são proventos diferentes.
+    """
     base = max(abs(gross_a), abs(gross_b), 1e-9)
-    return diff <= 0.005 or diff / base <= 0.01
+    return abs(gross_a - gross_b) / base <= 0.01
 
 
 def aware(moment: datetime, tz: ZoneInfo = TZ) -> datetime:

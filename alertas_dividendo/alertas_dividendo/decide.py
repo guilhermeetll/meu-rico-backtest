@@ -32,11 +32,12 @@ class Snapshot:
 
 @dataclass(frozen=True)
 class Prior:
-    """Sinal já registrado com o mesmo papel e o mesmo R$/ação."""
+    """Sinal já registrado do mesmo papel, com o R$/ação e a data do anúncio."""
 
     gross: float
     data_com: date | None
     kind: str
+    approval: date | None = None
 
 
 @dataclass(frozen=True)
@@ -81,19 +82,28 @@ def decide(
                 continue
             if not same_cash_event(prior.gross, gross):
                 continue
-            # Parcela com outra data-com é outro evento, mesmo com o mesmo R$/ação.
-            if prior.data_com is not None and data_com is not None and prior.data_com != data_com:
-                continue
-            if prior.data_com is None and data_com is not None:
-                if not has_rights(plan.buy_date, data_com):
-                    return Decision("ignorar", "sem_direito", plan=plan)
-                return Decision(
-                    "atualizar",
-                    "data_com",
-                    plan=plan,
-                    exit_date=exit_session(data_com, calendar),
-                )
-            return Decision("ignorar", "duplicado", plan=plan)
+            same_record = (
+                prior.data_com is not None and data_com is not None and prior.data_com == data_com
+            )
+            same_announcement = (
+                prior.approval is not None and approval is not None and prior.approval == approval
+            )
+            # Duplicata só com a mesma data-com, ou com o aviso anterior ainda
+            # sem data-com e o mesmo anúncio. JCP trimestral do mesmo valor e
+            # parcelas iguais com data-com diferente seguem como eventos novos.
+            if same_record:
+                return Decision("ignorar", "duplicado", plan=plan)
+            if prior.data_com is None and same_announcement:
+                if data_com is not None:
+                    if not has_rights(plan.buy_date, data_com):
+                        return Decision("ignorar", "sem_direito", plan=plan)
+                    return Decision(
+                        "atualizar",
+                        "data_com",
+                        plan=plan,
+                        exit_date=exit_session(data_com, calendar),
+                    )
+                return Decision("ignorar", "duplicado", plan=plan)
 
     if passes_liquidity(snapshot.avg_volume, snapshot.volume_sessions) == "historico_insuficiente":
         return Decision("ignorar", "historico_insuficiente", plan=plan)

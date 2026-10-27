@@ -57,9 +57,15 @@ def _tipo(kind: str, gross: float, net: float | None) -> str:
             f"Valor líquido por ação (15% retido na fonte): {brl(liquido)}"
         )
     if kind == "misto":
+        caixa = (
+            f"\nCaixa por ação (15% retido só na parte de JCP): {brl(net)}"
+            if net is not None
+            else ""
+        )
         return (
-            f"dividendo/JCP (o documento mistura os dois — conferir)\n"
-            f"Valor por ação usado no yield: {brl(gross)} (bruto, sem reter 15%)"
+            "dividendo e JCP na mesma data-com\n"
+            f"Valor bruto por ação (usado no yield): {brl(gross)}"
+            + caixa
         )
     label = "dividendo" if kind == "dividendo" else "provento (tipo não classificado)"
     return f"{label}\nValor por ação: {brl(gross)}"
@@ -172,6 +178,11 @@ def buy_message(
             ),
         ]
     )
+    if data_com is None:
+        lines.append(
+            "ATENÇÃO: a data-com não é conhecida antes desta compra. "
+            "A saída (20º pregão) e o direito ao provento ainda não estão confirmados."
+        )
     if entry_price is not None:
         lines.append(
             f"Entrada de papel: {brl(entry_price, 2)} em {day(buy_date)} ({entry_source or 'fonte não registrada'})"
@@ -207,7 +218,7 @@ def conferir_message(
             f"Assunto: {subject}",
             f"Publicação na CVM: {moment(published_at)}",
             "A liquidez passa o filtro de R$ 1 milhão, mas o valor por ação não saiu do PDF.",
-            "Sem valor não há entrada automática: a regra exige yield entre 2% e 30%.",
+            "Sem valor não há entrada automática: a regra exige yield de 2% até menos de 30%.",
             f"Protocolo CVM: {protocol}",
             f"Documento: {url}",
         ]
@@ -222,6 +233,7 @@ def exit_message(
     data_com: date | None,
     reminder: bool,
     simulacao: bool,
+    corporate_action: str | None = None,
 ) -> str:
     if reminder:
         title = f"LEMBRETE DE SAÍDA — {ticker}"
@@ -244,6 +256,12 @@ def exit_message(
             _execucao(exit_date),
         ]
     )
+    if corporate_action:
+        body += (
+            "\nDesdobramento ou grupamento durante a posição: "
+            + corporate_action
+            + " O preço de entrada e de saída não foi ajustado."
+        )
     return with_disclaimer(body, simulacao)
 
 
@@ -265,11 +283,17 @@ def result_message(
     cumulative: float,
     closed_trades: int,
     simulacao: bool,
+    corporate_action: str | None = None,
 ) -> str:
     if kind == "jcp":
         provento = (
             f"Provento recebido: {brl(dividend)} por ação "
             f"(JCP líquido; bruto {brl(gross)}, 15% retido)"
+        )
+    elif kind == "misto":
+        provento = (
+            f"Provento recebido: {brl(dividend)} por ação "
+            f"(dividendo integral e JCP líquido; bruto somado {brl(gross)})"
         )
     elif dividend == 0:
         provento = "Provento recebido: R$ 0 (a posição não estava aberta na data-com, ou o valor não fechou)"
@@ -291,10 +315,17 @@ def result_message(
             (
                 f"Resultado acumulado da carteira de papel "
                 f"(cada trade usa {pct(SLOT_WEIGHT).lstrip('+')} do capital, composto na saída, "
-                f"{closed_trades} trade{'s' if closed_trades != 1 else ''}): {pct(cumulative)}"
+                f"{closed_trades} trade{'s' if closed_trades != 1 else ''}): {pct(cumulative)}. "
+                "Este acumulado ignora custos, impostos e o CDI do caixa parado."
             ),
         ]
     )
+    if corporate_action:
+        body += (
+            "\nDesdobramento ou grupamento durante a posição: "
+            + corporate_action
+            + " O preço de entrada e de saída não foi ajustado."
+        )
     return with_disclaimer(body, simulacao)
 
 
