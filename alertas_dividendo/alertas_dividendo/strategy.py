@@ -1,8 +1,8 @@
 """Regras congeladas do swing de dividendo. Não parametrizar por ambiente.
 
-A leitura de horário (noite x durante o pregão) está em `buy_plan`. Os dois
-casos compram no fechamento do pregão seguinte à data de publicação na CVM,
-que é a regra do backtest (primeiro fechamento depois da Data_Entrega).
+A compra é o fechamento do pregão seguinte à data de publicação na CVM, com
+ou sem hora de entrega. A hora fica em `timing` só para o log e a mensagem.
+O yield do backtest usa o mesmo fechamento de entrada (`last_close_session`).
 """
 
 from __future__ import annotations
@@ -96,12 +96,11 @@ def buy_plan(
     time_known: bool,
     calendar: Calendar,
 ) -> BuyPlan:
-    """Fechamento do primeiro pregão depois da data em que o documento ficou público.
+    """Fechamento do primeiro pregão depois da data de publicação.
 
-    Noite (depois do call, fim de semana, feriado ou data sem hora): o pregão
-    seguinte. Durante o pregão: também o pregão seguinte — não o call do mesmo
-    dia. Antes da abertura vale a mesma data de publicação, porque o backtest
-    não tinha horário e a regra congelada é por data.
+    A hora (durante o pregão, depois do call, antes da abertura, dia sem
+    pregão ou fonte sem hora) fica em `timing` só para o log. A compra é
+    sempre o pregão seguinte. Compra no mesmo dia não foi testada.
     """
     if isinstance(published_at, datetime):
         local = published_at.astimezone(TZ) if published_at.tzinfo else published_at.replace(tzinfo=TZ)
@@ -121,18 +120,37 @@ def buy_plan(
     )
 
 
-def last_close_session(published_day: date, timing: str, calendar: Calendar) -> date:
-    """Último fechamento já realizado quando o anúncio fica público.
+def last_close_session(published_day: date, calendar: Calendar) -> date:
+    """Fechamento que o backtest usa no yield: o preço de entrada.
 
-    Durante o pregão e antes da abertura, o fechamento do dia ainda não existe.
-    Depois do call, ou quando só há a data (tratada como fim do dia), o
-    fechamento daquele pregão entra na conta se o dia teve pregão.
+    Rodada 9 congela "yield no preço de entrada". O script da rodada 11
+    (`dividendo_atraso_cvm.py`) faz `s0 = idx.searchsorted(data, side='right')`
+    e `y = valor / C[s0]`. `side='right'` é o primeiro pregão estritamente
+    depois da data — o mesmo pregão da compra. A hora da entrega não entra.
     """
-    if timing in {"durante_pregao", "antes_da_abertura"}:
-        return calendar.previous_session(published_day)
-    if calendar.is_session(published_day):
-        return published_day
-    return calendar.previous_session(published_day)
+    return calendar.next_session(published_day)
+
+
+def yield_close_action(
+    now: datetime,
+    reference: date,
+    deadline: datetime,
+    quote_ready: bool,
+    calendar: Calendar,
+) -> str:
+    """`usar`, `esperar` ou `substituir`.
+
+    `usar`: o fechamento de referência já está na base.
+    `esperar`: ele ainda não está, mas o pregão fecha antes do prazo do
+    alerta, então a próxima hora ainda dá tempo de avisar. Não grava sinal.
+    `substituir`: esse fechamento só sai no call da compra, ou o prazo já
+    chegou. O alerta usa o último fechamento disponível e diz isso.
+    """
+    if quote_ready:
+        return "usar"
+    if calendar.close_at(reference) < deadline and aware(now) < deadline:
+        return "esperar"
+    return "substituir"
 
 
 def exit_session(data_com: date, calendar: Calendar) -> date:

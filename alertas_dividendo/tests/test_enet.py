@@ -125,7 +125,8 @@ def test_captcha_para_no_segundo_mes_e_nao_repete():
     assert "01/11/2026" in calls[1]
 
 
-def test_hora_de_entrega_escolhe_o_fechamento_de_referencia():
+def test_hora_de_entrega_nao_muda_o_fechamento_do_yield():
+    """A hora fica no rótulo. O yield usa o pregão seguinte, nos dois horários."""
     night = parse_enet_dados(ROW)[0]
     day = parse_enet_dados(ROW_DIA)[0]
     night_plan = buy_plan(night.published_at, night.time_known, CAL)
@@ -134,8 +135,8 @@ def test_hora_de_entrega_escolhe_o_fechamento_de_referencia():
     assert day_plan.timing == "durante_pregao"
     assert night_plan.buy_date == date(2026, 10, 22)
     assert day_plan.buy_date == date(2026, 10, 22)
-    assert last_close_session(night.published_at.date(), night_plan.timing, CAL) == date(2026, 10, 21)
-    assert last_close_session(day.published_at.date(), day_plan.timing, CAL) == date(2026, 10, 20)
+    assert last_close_session(night.published_at.date(), CAL) == date(2026, 10, 22)
+    assert last_close_session(day.published_at.date(), CAL) == date(2026, 10, 22)
 
 
 def test_captcha_avisa_uma_vez_e_nao_consulta_de_novo(tmp_path, monkeypatch):

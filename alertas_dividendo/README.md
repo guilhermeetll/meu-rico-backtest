@@ -96,12 +96,20 @@ que cruza o mês vira um pedido por mês, com pausa de 5 segundos entre eles.
 Se o serviço responder 500, há uma pausa e uma segunda tentativa. Se pedir
 captcha, para na hora, sem repetir.
 
-A hora decide a regra de compra:
+A hora da entrega fica só no log e na mensagem (durante o pregão, depois do
+fechamento, antes da abertura). Ela não muda a compra nem o yield.
 
-- entrega durante o pregão: comprar no fechamento do pregão seguinte, e o
-  rendimento usa o fechamento anterior;
-- entrega depois do call (ou em dia sem pregão): comprar no fechamento do
-  pregão seguinte, e o rendimento usa o fechamento do dia, se o pregão existiu.
+A compra é sempre o fechamento do pregão seguinte à data de publicação,
+mesmo se o aviso sair no meio do pregão. Compra no mesmo dia não foi testada.
+
+O yield do backtest (rodada 9, refeita na rodada 11 em `dividendo_atraso_cvm.py`)
+é o valor por ação dividido pelo fechamento de entrada: `y = valor / C[s0]`,
+com `s0 = searchsorted(data, side='right')` — o primeiro pregão depois da
+data. Esse fechamento só existe no call da compra, que é depois do prazo do
+alerta. O aviso sai antes, com o último fechamento já publicado, e o texto
+diz que não é o preço de entrada. Se o fechamento de referência pudesse sair
+antes desse prazo e ainda não estivesse na base, a varredura espera a hora
+seguinte e não grava o sinal.
 
 Se a CVM responder `SolicitarCaptcha = S`, o comando para, grava o dia, manda
 um aviso no Telegram e não consulta o ENET de novo até o dia seguinte. O aviso
@@ -116,8 +124,10 @@ mensagem diz a origem de cada número.
 ## Regras (não alterar)
 
 1. Gatilho: dividendo ou JCP tornado público na CVM (aviso ou ata).
-2. Rendimento entre 2% e 30% sobre o último fechamento. No JCP o rendimento usa
-   o valor bruto; o alerta mostra também o líquido (15% retido).
+2. Rendimento entre 2% e 30% sobre o fechamento de entrada (o mesmo pregão da
+   compra). No JCP o rendimento usa o valor bruto; o alerta mostra também o
+   líquido (15% retido). Se esse fechamento ainda não saiu, o alerta usa o
+   último disponível e rotula a data.
 3. Volume financeiro médio de 60 pregões de pelo menos R$ 1 milhão.
 4. Compra no fechamento do primeiro pregão depois do anúncio. O alerta tem de
    chegar antes desse call.

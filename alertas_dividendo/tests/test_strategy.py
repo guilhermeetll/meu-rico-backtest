@@ -18,7 +18,9 @@ from alertas_dividendo.strategy import (
     exit_session,
     index_return,
     jcp_net,
+    last_close_session,
     passes_liquidity,
+    yield_close_action,
     same_cash_event,
     trade_return,
     yield_ratio,
@@ -97,6 +99,9 @@ def test_night_buys_next_session_and_intraday_does_not_buy_the_same_close():
     assert after_call.buy_date == _d(2026, 10, 22)
     assert night.deadline == _at(2026, 10, 22, 16, 55)
     assert intraday.deadline == night.deadline
+    # O yield do backtest é o fechamento de entrada, sem olhar a hora.
+    assert last_close_session(_d(2026, 10, 21), CAL) == night.buy_date
+    assert last_close_session(_d(2026, 10, 21), CAL) == intraday.buy_date
 
 
 def test_friday_night_and_friday_intraday_skip_the_weekend():
@@ -238,8 +243,23 @@ def test_saud3_decision_matches_the_frozen_trade():
     )
     assert decision.action == "comprar"
     assert decision.plan.buy_date == _d(2026, 10, 22)
+    assert decision.price_session == _d(2026, 10, 22)
     assert decision.exit_date == _d(2026, 12, 1)
     assert decision.yld == 0.342059542 / 15.42
+
+
+def test_entry_close_cannot_be_waited_for_before_the_buy():
+    """O fechamento de entrada sai no call, depois do prazo do alerta."""
+    buy = _d(2026, 10, 22)
+    deadline = _at(2026, 10, 22, 16, 55)
+    assert CAL.close_at(buy) == _at(2026, 10, 22, 17, 0)
+    assert yield_close_action(_at(2026, 10, 21, 15, 0), buy, deadline, False, CAL) == "substituir"
+    assert yield_close_action(_at(2026, 10, 22, 16, 0), buy, deadline, False, CAL) == "substituir"
+    assert yield_close_action(_at(2026, 10, 22, 17, 5), buy, deadline, True, CAL) == "usar"
+    # Um fechamento que imprime antes do prazo ainda pode chegar na hora seguinte.
+    published = _d(2026, 10, 21)
+    assert yield_close_action(_at(2026, 10, 21, 15, 0), published, deadline, False, CAL) == "esperar"
+    assert yield_close_action(_at(2026, 10, 22, 17, 0), published, deadline, False, CAL) == "substituir"
 
 
 def test_no_rights_when_buy_is_after_data_com():

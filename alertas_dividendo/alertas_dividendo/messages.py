@@ -65,6 +65,34 @@ def _tipo(kind: str, gross: float, net: float | None) -> str:
     return f"{label}\nValor por ação: {brl(gross)}"
 
 
+def _yield_line(
+    yld: float,
+    last_close: float,
+    last_close_date: date,
+    last_close_source: str,
+    reference_close_date: date,
+    reference_close_used: bool,
+) -> str:
+    """O preço de referência é o fechamento de entrada do backtest.
+
+    Quando ele ainda não saiu, o número usa o último fechamento disponível
+    e o texto deixa isso explícito. A hora da entrega não escolhe o pregão.
+    """
+    if reference_close_used:
+        return (
+            f"Yield: {pct(yld)} sobre o fechamento de entrada de {brl(last_close, 2)} "
+            f"em {day(last_close_date)} ({last_close_source}). "
+            "É o preço do backtest: primeiro pregão após a data de publicação."
+        )
+    return (
+        f"Yield: {pct(yld)} sobre o último fechamento disponível de {brl(last_close, 2)} "
+        f"em {day(last_close_date)} ({last_close_source}). "
+        f"O backtest usa o fechamento de {day(reference_close_date)} "
+        "(primeiro pregão após a data de publicação). Esse fechamento ainda não saiu; "
+        "esperar por ele só permitiria avisar depois da compra."
+    )
+
+
 def _execucao(session: date) -> str:
     return (
         f"Execução: ordem limitada perto do fechamento de {day(session)} "
@@ -88,6 +116,8 @@ def buy_message(
     published_at: datetime,
     time_known: bool,
     timing: str,
+    reference_close_date: date,
+    reference_close_used: bool,
     data_com: date | None,
     data_ex: date | None,
     buy_date: date,
@@ -121,9 +151,13 @@ def buy_message(
             f"Papel: {ticker}",
             f"Empresa: {company}",
             f"Tipo: {_tipo(kind, gross, net)}",
-            (
-                f"Yield: {pct(yld)} sobre o último fechamento de {brl(last_close, 2)} "
-                f"em {day(last_close_date)} ({last_close_source})"
+            _yield_line(
+                yld,
+                last_close,
+                last_close_date,
+                last_close_source,
+                reference_close_date,
+                reference_close_used,
             ),
             f"Aprovação / data de referência: {day(approval) if approval else 'não informada'}",
             f"Publicação na CVM: {when} — {timing_label}",

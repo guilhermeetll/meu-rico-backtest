@@ -116,7 +116,7 @@ def decide(
         return Decision("ignorar", "carteira_cheia", yld=yld, plan=plan)
 
     exit_date = exit_session(data_com, calendar) if data_com else None
-    price_session = last_close_session(published_day, plan.timing, calendar)
+    price_session = last_close_session(published_day, calendar)
     return Decision(
         "comprar",
         "ok",

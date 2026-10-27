@@ -1,6 +1,6 @@
 """Varredura duas vezes: extração falha não pode derrubar o SQLite, e prazo vencido não abre posição."""
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from alertas_dividendo.calendar import TZ, Calendar
 from alertas_dividendo.config import Config
@@ -161,6 +161,115 @@ def test_missed_buy_deadline_is_ignored_and_not_opened(tmp_path, monkeypatch):
             (cfg.now.isoformat(),),
         )
         assert realized_returns(store) == [0.15]
+    finally:
+        store.close()
+
+
+_DIVIDEND = (
+    "Aprovaram dividendos de R$ 0,50 por ação. "
+    "Farão jus os detentores de ações em 30 de outubro de 2026."
+)
+
+
+def test_intraday_notice_alerts_with_the_latest_close_labeled(tmp_path, monkeypatch):
+    """O fechamento de entrada é o pregão seguinte e só sai no call da compra.
+
+    Aviso no meio do pregão: não espera esse fechamento (já seria tarde) e
+    avisa com o último disponível, dizendo a data. A hora fica só no texto.
+    """
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 21, 14, 0, tzinfo=TZ)
+    _seed(store, "9101", _DIVIDEND, published)
+    # O seed conta o dia 21. No meio do pregão esse fechamento ainda não existe;
+    # reponho um pregão antigo para a média de 60 continuar válida.
+    store.conn.execute("DELETE FROM quotes WHERE session_date >= '2026-10-21'")
+    oldest = date.fromisoformat(store.conn.execute("SELECT MIN(session_date) AS d FROM quotes").fetchone()["d"])
+    extra = oldest
+    while True:
+        extra -= timedelta(days=1)
+        if CAL.is_session(extra):
+            break
+    store.insert_quotes_if_absent([("ZZZZ3", extra.isoformat(), 10.0, 2_000_000.0, "teste")])
+    store.commit()
+    cfg = _cfg(tmp_path, datetime(2026, 10, 21, 15, 0, tzinfo=TZ), dry_run=False)
+    try:
+        first = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, first)
+        assert len(sent) == 1
+        body = sent[0]
+        assert "durante o pregão" in body
+        assert "último fechamento disponível" in body
+        assert "20/10/2026" in body
+        assert "22/10/2026" in body
+        assert "ainda não saiu" in body
+        signal = store.conn.execute(
+            "SELECT status, last_close_date, timing, buy_date FROM signals"
+        ).fetchone()
+        assert signal["status"] == "aguardando_compra"
+        assert signal["last_close_date"] == "2026-10-20"
+        assert signal["timing"] == "durante_pregao"
+        assert signal["buy_date"] == "2026-10-22"
+        assert store.open_position_count() == 1
+        second = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, second)
+        assert len(sent) == 1
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"] == 1
+    finally:
+        store.close()
+
+
+def test_after_close_uses_the_publication_close_still_labeled_as_proxy(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 21, 18, 0, tzinfo=TZ)
+    _seed(store, "9102", _DIVIDEND, published)
+    cfg = _cfg(tmp_path, datetime(2026, 10, 21, 19, 0, tzinfo=TZ), dry_run=False)
+    try:
+        _scan(cfg, store, CAL, Report(now=cfg.now, dry_run=False))
+        assert len(sent) == 1
+        body = sent[0]
+        assert "depois do fechamento" in body
+        assert "último fechamento disponível" in body
+        assert "21/10/2026" in body
+        assert "22/10/2026" in body
+        signal = store.conn.execute("SELECT last_close_date, timing, buy_date FROM signals").fetchone()
+        assert signal["last_close_date"] == "2026-10-21"
+        assert signal["timing"] == "apos_fechamento"
+        assert signal["buy_date"] == "2026-10-22"
+    finally:
+        store.close()
+
+
+def test_waits_for_a_close_that_prints_before_the_buy_deadline(tmp_path, monkeypatch):
+    """Se o fechamento de referência imprime antes do prazo, a hora seguinte espera por ele."""
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    monkeypatch.setattr(
+        "alertas_dividendo.engine.last_close_session",
+        lambda _day, _calendar: date(2026, 10, 21),
+    )
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 21, 14, 0, tzinfo=TZ)
+    _seed(store, "9103", _DIVIDEND, published)
+    early = _cfg(tmp_path, datetime(2026, 10, 21, 15, 0, tzinfo=TZ), dry_run=False)
+    try:
+        first = Report(now=early.now, dry_run=False)
+        _scan(early, store, CAL, first)
+        assert sent == []
+        assert any("aguardando fechamento de 2026-10-21" in line for line in first.ignored)
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"] == 0
+        later = _cfg(tmp_path, datetime(2026, 10, 21, 18, 0, tzinfo=TZ), dry_run=False)
+        _scan(later, store, CAL, Report(now=later.now, dry_run=False))
+        assert len(sent) == 1
+        assert "fechamento de entrada" in sent[0]
+        assert "último fechamento disponível" not in sent[0]
+        assert "21/10/2026" in sent[0]
+        assert "durante o pregão" in sent[0]
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"] == 1
+        assert store.conn.execute("SELECT last_close_date FROM signals").fetchone()["last_close_date"] == "2026-10-21"
     finally:
         store.close()
 

@@ -38,10 +38,11 @@ from alertas_dividendo.strategy import (
     aware,
     buy_plan,
     cumulative_result,
+    last_close_session,
+    yield_close_action,
     dividend_received,
     index_return,
     jcp_net,
-    last_close_session,
     passes_liquidity,
     trade_return,
 )
@@ -95,8 +96,7 @@ def _ex_date(stated: date | None, data_com: date | None, calendar: Calendar) -> 
     return None
 
 
-def _snapshot(store: Store, ticker: str, price_day: date) -> Snapshot:
-    rows = store.history(ticker, price_day.isoformat())
+def _snapshot_from_rows(rows) -> Snapshot:
     if not rows:
         return Snapshot(None, None, None, None, 0)
     from alertas_dividendo.strategy import average_volume
@@ -111,6 +111,20 @@ def _snapshot(store: Store, ticker: str, price_day: date) -> Snapshot:
         avg_volume=average,
         volume_sessions=count,
     )
+
+
+def _closes_for_yield(store: Store, ticker: str, reference: date, now: datetime, calendar: Calendar):
+    """Barras até o fechamento de referência, e se esse fechamento já é oficial.
+
+    Uma cotação gravada antes do call não conta: o backtest usa o fechamento.
+    """
+    rows = list(store.history(ticker, reference.isoformat()))
+    if not rows:
+        return rows, False
+    last_day = date.fromisoformat(rows[-1]["session_date"])
+    if last_day == reference and aware(now) < calendar.close_at(reference):
+        return rows[:-1], False
+    return rows, last_day == reference
 
 
 def _price(store: Store, ticker: str, session: date, now: datetime, calendar: Calendar) -> tuple[float, str] | None:
@@ -364,10 +378,25 @@ def _scan(cfg: Config, store: Store, calendar: Calendar, report: Report) -> None
         time_known = bool(earliest["time_known"])
         published = _parse_dt(earliest["published_at"])
         plan = buy_plan(published, time_known, calendar)
-        price_day = last_close_session(published.date(), plan.timing, calendar)
+        yield_session = last_close_session(published.date(), calendar)
         liquid = []
         for ticker in tickers:
-            snap = _snapshot(store, ticker, price_day)
+            bars, ready = _closes_for_yield(store, ticker, yield_session, cfg.now, calendar)
+            action = yield_close_action(cfg.now, yield_session, plan.deadline, ready, calendar)
+            if action == "esperar":
+                line = (
+                    f"{ticker} protocolo {earliest['protocol']} aguardando fechamento de "
+                    f"{yield_session.isoformat()} para o yield"
+                )
+                report.ignore(line)
+                store.log_event(
+                    "aguardando_fechamento",
+                    ticker=ticker,
+                    protocol=earliest["protocol"],
+                    detail=line,
+                )
+                continue
+            snap = _snapshot_from_rows(bars)
             gate = passes_liquidity(snap.avg_volume, snap.volume_sessions)
             if gate != "ok":
                 volume = f"{snap.avg_volume:.0f}" if snap.avg_volume is not None else "sem média"
@@ -378,11 +407,11 @@ def _scan(cfg: Config, store: Store, calendar: Calendar, report: Report) -> None
                 report.ignore(line)
                 store.log_event(gate, ticker=ticker, protocol=earliest["protocol"], detail=line)
                 continue
-            liquid.append((ticker, snap))
+            liquid.append((ticker, snap, ready))
         if not liquid:
             continue
         texts = {doc["protocol"]: _document_text_cfg(cfg, store, doc, published.date()) for doc in group}
-        for ticker, snap in liquid:
+        for ticker, snap, ready in liquid:
             pairs: list[tuple] = []
             for doc in group:
                 text = texts.get(doc["protocol"]) or ""
@@ -404,6 +433,8 @@ def _scan(cfg: Config, store: Store, calendar: Calendar, report: Report) -> None
                 published,
                 time_known,
                 open_slots,
+                yield_session,
+                ready,
             )
             if opened:
                 open_slots += 1
@@ -445,7 +476,10 @@ def realized_returns(store: Store) -> list[float]:
     return out
 
 
-def _emit_ticker(cfg, store, calendar, report, ticker, issuer, company, group, pairs, snap, published, time_known, open_slots) -> bool:
+def _emit_ticker(
+    cfg, store, calendar, report, ticker, issuer, company, group, pairs, snap, published, time_known, open_slots,
+    reference: date, reference_ready: bool,
+) -> bool:
     earliest = min(group, key=lambda doc: doc["published_at"])
     approval = date.fromisoformat(earliest["reference_date"]) if earliest["reference_date"] else published.date()
     if not pairs:
@@ -555,6 +589,8 @@ def _emit_ticker(cfg, store, calendar, report, ticker, issuer, company, group, p
         published_at=published,
         time_known=time_known,
         timing=plan.timing,
+        reference_close_date=reference,
+        reference_close_used=reference_ready and snap.last_close_date == reference,
         data_com=data_com,
         data_ex=data_ex,
         buy_date=plan.buy_date,

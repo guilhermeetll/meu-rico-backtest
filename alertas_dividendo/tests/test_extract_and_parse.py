@@ -176,6 +176,8 @@ def test_messages_carry_simulacao_and_jcp_net():
         published_at=datetime(2026, 10, 21, 17, 37, tzinfo=TZ),
         time_known=True,
         timing="apos_fechamento",
+        reference_close_date=date(2026, 10, 22),
+        reference_close_used=False,
         data_com=date(2026, 10, 30),
         data_ex=date(2026, 11, 3),
         buy_date=date(2026, 10, 22),
@@ -190,6 +192,9 @@ def test_messages_carry_simulacao_and_jcp_net():
     )
     assert body.startswith("SIMULAÇÃO")
     assert "líquido" in body
+    assert "último fechamento disponível" in body
+    assert "22/10/2026" in body
+    assert "depois do fechamento" in body
     assert "0,850000" in body
     assert "ordem limitada" in body
     assert DISCLAIMER.split("—")[0].strip() in body
