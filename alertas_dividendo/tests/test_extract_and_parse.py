@@ -93,6 +93,22 @@ def test_jcp_gross_and_stated_net():
     assert item.net == 0.85
 
 
+MTRE = """
+aprovou dividendos intermediários no montante de R$ 12.000.000,00,
+equivalente a R$ 0,11344855041 por ação ordinária.
+O pagamento será efetuado em 3 (três) parcelas de R$ 4.000.000,00.
+   01ª      4.000.000,00    0,03781618347       15/10/2026   20/10/2026   21/10/2026   30/10/2026
+   02ª      4.000.000,00    0,03781618347       15/10/2026   13/11/2026   16/11/2026   27/11/2026
+   03ª      4.000.000,00    0,03781618347       15/10/2026   11/12/2026   14/12/2026   23/12/2026
+  Total    12.000.000,00    0,11344855041
+"""
+
+
+def test_mtre_installments_are_not_a_single_per_share_value():
+    found = extract_distributions(MTRE, ticker="MTRE3", published=date(2026, 10, 15))
+    assert found == []
+
+
 def test_empty_text_means_conferir_valor():
     assert extract_distributions("A companhia aprova dividendos, sem informar o valor.") == []
 

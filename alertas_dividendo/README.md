@@ -75,9 +75,11 @@ TELEGRAM_CHAT_ID=coloque_o_chat
 ```
 
 O `run` das 8h às 22h cobre a entrega do documento e a compra no pregão
-seguinte. O lembrete das 16:55 é o da venda, no dia da saída. Na Quarta-feira
-de Cinzas o call é às 18:00; nesse dia troque o lembrete para 17:55 ou deixe o
-`run` da tarde disparar o que ainda estiver no prazo. O comando não vende de
+seguinte. O lembrete de venda sai na hora do call daquele pregão: desde as
+16:00 num dia comum (call 16:55) e desde as 17:00 na Quarta-feira de Cinzas
+(call 17:55, fechamento 18:00). O crontab das 16:55 não pega a Cinzas; o
+`run` das 17:00 pega. Um sinal cujo fechamento de compra já passou é ignorado
+(`prazo de compra já passou`) e não abre posição. O comando não vende de
 verdade: só avisa.
 
 ## De onde vêm os documentos

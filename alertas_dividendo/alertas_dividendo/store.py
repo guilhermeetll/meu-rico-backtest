@@ -347,19 +347,50 @@ class Store:
             (session,),
         ).fetchone()
 
+    def signal_by_dedupe(self, key: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM signals WHERE dedupe_key=?",
+            (key,),
+        ).fetchone()
+
+    def conferir_exists(self, protocol: str, ticker: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1 FROM signals
+            WHERE protocol=? AND ticker=? AND status='conferir' LIMIT 1
+            """,
+            (protocol, ticker),
+        ).fetchone()
+        return row is not None
+
     def insert_signal(self, row: dict) -> int:
+        """Insere o sinal. Se a chave já existe, devolve o id — não derruba a varredura."""
+        existing = self.signal_by_dedupe(row["dedupe_key"])
+        if existing is not None:
+            return int(existing["id"])
         columns = list(row)
         placeholders = ",".join(":" + name for name in columns)
         names = ",".join(columns)
-        cursor = self.conn.execute(
-            f"INSERT INTO signals ({names}) VALUES ({placeholders})",
-            row,
-        )
+        try:
+            cursor = self.conn.execute(
+                f"INSERT INTO signals ({names}) VALUES ({placeholders})",
+                row,
+            )
+        except sqlite3.IntegrityError:
+            existing = self.signal_by_dedupe(row["dedupe_key"])
+            if existing is None:
+                raise
+            return int(existing["id"])
         return int(cursor.lastrowid)
 
     def signals_for_ticker(self, ticker: str) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT * FROM signals WHERE ticker=? AND status IN ('aguardando_compra','aberta','encerrada','conferir')",
+            """
+            SELECT * FROM signals
+            WHERE ticker=? AND status IN (
+                'aguardando_compra','aberta','encerrada','conferir','ignorado'
+            )
+            """,
             (ticker,),
         ).fetchall()
 

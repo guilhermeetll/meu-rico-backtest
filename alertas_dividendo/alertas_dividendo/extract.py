@@ -377,6 +377,36 @@ def _pick_row(
     return min(rows, key=lambda row: (abs((row[0] - published).days), -row[0].toordinal()))
 
 
+def _installment_sum(text: str, gross: float) -> bool:
+    """O R$/ação do parágrafo é a soma de várias parcelas com datas-base diferentes.
+
+    O aviso da Mitre (MTRE3, out/2026) declara R$ 0,11344855041 por ação e, na
+    tabela, três parcelas de R$ 0,03781618347. A B3 lista cada parcela. Usar a
+    soma como se fosse um único provento erra o yield e o caixa do swing.
+    """
+    if gross <= 0 or "parcela" not in flatten(text):
+        return False
+    parts: list[float] = []
+    for match in re.finditer(r"(?<!\d)(\d+,\d{4,12})(?!\d)", flatten(text)):
+        try:
+            value = parse_br_number(match.group(1))
+        except ValueError:
+            continue
+        if 0 < value < gross * 0.98:
+            parts.append(round(value, 10))
+    if len(parts) < 2:
+        return False
+    distinct = set(parts)
+    if len(distinct) >= 2 and abs(sum(distinct) - gross) / gross <= 0.02:
+        return True
+    for value in distinct:
+        ratio = gross / value
+        nearest = round(ratio)
+        if nearest >= 2 and abs(ratio - nearest) <= 0.02 * nearest and parts.count(value) >= 2:
+            return True
+    return False
+
+
 def extract_distributions(
     text: str,
     *,
@@ -393,6 +423,9 @@ def extract_distributions(
     wanted = ticker_class(ticker)
     chosen = [item for item in prose if item.share_class in {wanted, "any"}] if ticker else prose
     if chosen:
+        safe = [item for item in chosen if not _installment_sum(text, item.gross)]
+        if len(safe) < len(chosen):
+            return safe
         return chosen
     row = _pick_row(_table_rows(text), published_day)
     if row is None:

@@ -162,6 +162,19 @@ class Calendar:
         hours = self.hours(session)
         return datetime.combine(session, hours.call_start, tzinfo=TZ)
 
+    def near_close(self, moment: datetime, session: date) -> bool:
+        """Lembrete de saída: a partir do início da hora do call desse pregão.
+
+        Pregão comum: call 16:55, lembrete desde 16:00. Quarta de Cinzas: call
+        17:55, lembrete desde 17:00. Um aviso às 16h nesse dia sai cedo demais.
+        """
+        local = moment.astimezone(TZ) if moment.tzinfo else moment.replace(tzinfo=TZ)
+        if local.date() != session:
+            return False
+        hours = self.hours(session)
+        window = datetime.combine(session, time(hours.call_start.hour, 0), tzinfo=TZ)
+        return local >= window
+
     def close_at(self, session: date) -> datetime:
         hours = self.hours(session)
         return datetime.combine(session, hours.close, tzinfo=TZ)

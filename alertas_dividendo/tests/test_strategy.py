@@ -107,6 +107,16 @@ def test_friday_night_and_friday_intraday_skip_the_weekend():
     assert night.deadline.hour == 16 and night.deadline.minute == 55
 
 
+def test_exit_reminder_follows_the_call_including_ash_wednesday():
+    ash = _d(2026, 2, 18)
+    assert CAL.hours(ash).call_start.hour == 17 and CAL.hours(ash).call_start.minute == 55
+    assert CAL.near_close(_at(2026, 2, 18, 16, 30), ash) is False
+    assert CAL.near_close(_at(2026, 2, 18, 17, 0), ash) is True
+    regular = _d(2026, 10, 22)
+    assert CAL.near_close(_at(2026, 10, 22, 15, 59), regular) is False
+    assert CAL.near_close(_at(2026, 10, 22, 16, 0), regular) is True
+
+
 def test_date_only_and_holiday_and_ash_wednesday_clock():
     date_only = buy_plan(_d(2026, 10, 21), False, CAL)
     assert date_only.timing == "sem_horario"

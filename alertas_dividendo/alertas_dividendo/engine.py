@@ -325,7 +325,7 @@ def _priors(store: Store, ticker: str) -> list[Prior]:
     for row in store.signals_for_ticker(ticker):
         if row["gross_per_share"] is None:
             continue
-        if row["status"] not in {"aguardando_compra", "aberta", "encerrada"}:
+        if row["status"] not in {"aguardando_compra", "aberta", "encerrada", "ignorado"}:
             continue
         priors.append(
             Prior(
@@ -430,6 +430,21 @@ def relevant_row(doc) -> bool:
     return relevant(filing)
 
 
+def _signal_key(ticker: str, kind: str, gross: float | None, data_com: date | None, approval: date | None, protocol: str) -> str:
+    anchor = data_com or approval
+    return f"{ticker}|{kind}|{(gross or 0):.4f}|{anchor.isoformat() if anchor else ''}|{protocol}"
+
+
+def realized_returns(store: Store) -> list[float]:
+    """Retornos de posições que abriram e fecharam. Sinal ignorado não tem posição."""
+    out: list[float] = []
+    for row in store.positions_closed():
+        if row["entry_price"] is None or row["trade_return"] is None:
+            continue
+        out.append(float(row["trade_return"]))
+    return out
+
+
 def _emit_ticker(cfg, store, calendar, report, ticker, issuer, company, group, pairs, snap, published, time_known, open_slots) -> bool:
     earliest = min(group, key=lambda doc: doc["published_at"])
     approval = date.fromisoformat(earliest["reference_date"]) if earliest["reference_date"] else published.date()
@@ -486,6 +501,9 @@ def _emit_ticker(cfg, store, calendar, report, ticker, issuer, company, group, p
         _apply_update(cfg, store, report, ticker, data_com, data_ex, decision, decision_doc)
         return False
     if decision.action == "conferir_valor":
+        signal_key = _signal_key(ticker, kind, None, data_com, approval, decision_doc["protocol"])
+        if store.signal_by_dedupe(signal_key) is not None or store.conferir_exists(decision_doc["protocol"], ticker):
+            return False
         body = conferir_message(
             ticker=ticker,
             company=company,
@@ -507,8 +525,19 @@ def _emit_ticker(cfg, store, calendar, report, ticker, issuer, company, group, p
         return False
     plan = decision.plan
     assert plan is not None
-    late = aware(cfg.now) > plan.deadline
-    entry = _price(store, ticker, plan.buy_date, cfg.now, calendar) if late else None
+    if aware(cfg.now) > plan.deadline:
+        reason = "prazo de compra já passou"
+        signal_key = _signal_key(ticker, kind, gross, data_com, approval, decision_doc["protocol"])
+        if store.signal_by_dedupe(signal_key) is None:
+            line = f"{ticker} protocolo {decision_doc['protocol']} {reason}"
+            report.ignore(line)
+            store.log_event("prazo_passado", ticker=ticker, protocol=decision_doc["protocol"], detail=line)
+            if not cfg.dry_run:
+                _insert_signal(
+                    store, cfg, ticker, company, issuer, kind, gross, net, decision, snap,
+                    approval, data_com, data_ex, published, time_known, decision_doc, "ignorado", reason,
+                )
+        return False
     note = ""
     if data_com is not None and data_com <= cfg.now.date():
         mismatch = _cross_check(issuer, data_com, gross or 0, kind)
@@ -536,9 +565,9 @@ def _emit_ticker(cfg, store, calendar, report, ticker, issuer, company, group, p
         url=decision_doc["url"],
         protocol=decision_doc["protocol"],
         slot_number=open_slots + 1,
-        late=late,
-        entry_price=entry[0] if entry else None,
-        entry_source=entry[1] if entry else None,
+        late=False,
+        entry_price=None,
+        entry_source=None,
         simulacao=cfg.simulacao,
     )
     if note:
@@ -547,18 +576,17 @@ def _emit_ticker(cfg, store, calendar, report, ticker, issuer, company, group, p
         report.messages.append(body)
         return True
     signal_id = _insert_signal(
-        store, cfg, ticker, company, issuer, kind, gross, net, decision, snap, approval, data_com, data_ex, published, time_known, decision_doc, "aguardando_compra" if entry is None else "aberta", "",
+        store, cfg, ticker, company, issuer, kind, gross, net, decision, snap, approval, data_com, data_ex, published, time_known, decision_doc, "aguardando_compra", "",
     )
-    status = "aberta" if entry else "aguardando_compra"
-    store.update_signal(signal_id, status=status, late=1 if late else 0)
+    store.update_signal(signal_id, status="aguardando_compra", late=0)
     store.insert_position(
         {
             "signal_id": signal_id,
             "ticker": ticker,
-            "status": status,
+            "status": "aguardando_compra",
             "entry_date": plan.buy_date.isoformat(),
-            "entry_price": entry[0] if entry else None,
-            "entry_source": entry[1] if entry else None,
+            "entry_price": None,
+            "entry_source": None,
             "exit_date": decision.exit_date.isoformat() if decision.exit_date else None,
             "exit_price": None,
             "exit_source": None,
@@ -585,7 +613,7 @@ def _insert_signal(store, cfg, ticker, company, issuer, kind, gross, net, decisi
     plan = decision.plan
     return store.insert_signal(
         {
-            "dedupe_key": f"{ticker}|{kind}|{(gross or 0):.4f}|{(data_com or approval).isoformat()}|{doc['protocol']}",
+            "dedupe_key": _signal_key(ticker, kind, gross, data_com, approval, doc["protocol"]),
             "protocol": doc["protocol"],
             "ticker": ticker,
             "company_name": company,
@@ -688,7 +716,7 @@ def _advance(cfg: Config, store: Store, calendar: Calendar, report: Report, *, r
                 simulacao=cfg.simulacao,
             )
             _queue(cfg, store, report, f"saida|{position['id']}|{exit_date.isoformat()}", "saida", signal["id"], body)
-        if now.date() == exit_date and now.hour >= 16:
+        if calendar.near_close(now, exit_date):
             body = exit_message(
                 ticker=position["ticker"],
                 exit_date=exit_date,
@@ -736,8 +764,7 @@ def _close_position(cfg, store, report, position, filled_exit: tuple[float, str]
             closed_at=cfg.now.isoformat(timespec="seconds"),
         )
         store.update_signal(position["signal_id"], status="encerrada")
-    closed = list(store.positions_closed())
-    returns = [float(row["trade_return"]) for row in closed if row["trade_return"] is not None]
+    returns = realized_returns(store)
     if cfg.dry_run:
         returns.append(result)
     cumulative = cumulative_result(returns)
