@@ -129,10 +129,10 @@ def _yahoo(symbol: str, start: date, end: date) -> list[tuple[date, float, float
 
 def ensure_index(store: Store, start: date, end: date) -> None:
     """Ibovespa via Yahoo ^BVSP. O índice não vem no COTAHIST de ações."""
-    for session, close, _opened in _yahoo("^BVSP", start, end):
+    for session, close, opened in _yahoo("^BVSP", start, end):
         if session < start or session > end:
             continue
-        store.upsert_index(session.isoformat(), close, "Yahoo Finance ^BVSP")
+        store.upsert_index(session.isoformat(), close, "Yahoo Finance ^BVSP", open_price=opened)
 
 
 def yahoo_session(ticker: str, session: date) -> tuple[float | None, float | None]:

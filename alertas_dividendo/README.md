@@ -73,13 +73,27 @@ TELEGRAM_BOT_TOKEN=coloque_o_token
 TELEGRAM_CHAT_ID=coloque_o_chat
 0 8-22 * * 1-5 cd /opt/alertas_dividendo && /opt/alertas_dividendo/.venv/bin/python -m alertas_dividendo run
 0 9 * * 1-5 cd /opt/alertas_dividendo && /opt/alertas_dividendo/.venv/bin/python -m alertas_dividendo entry-reminder
+25 16 * * 1-5 cd /opt/alertas_dividendo && /opt/alertas_dividendo/.venv/bin/python -m alertas_dividendo run
 55 16 * * 1-5 cd /opt/alertas_dividendo && /opt/alertas_dividendo/.venv/bin/python -m alertas_dividendo exit-reminder
 ```
 
 O `scheduler.py` do servidor fica fora deste repositório. Ele precisa do job
 das 9h com `python -m alertas_dividendo entry-reminder`, ao lado do
-`exit-reminder` das 16:55. O `run` das 8h também cai na janela do lembrete de
-entrada (8:00 inclusive até 10:00) e o aviso sai uma vez só.
+`exit-reminder` das 16:55, e de um `run` extra às 16:25 nos dias úteis. O
+`run` das 8h também cai na janela do lembrete de entrada (8:00 inclusive até
+10:00) e o aviso sai uma vez só.
+
+O `run` das 16:25 usa o mesmo comando. Não há subcomando novo. 16:25 ainda é
+antes do corte das 16:30, então um aviso entregue mais cedo e visto nessa
+passada compra o fechamento do dia. O que já foi avisado não sai de novo: a
+chave do alerta é única e a reserva é gravada antes do envio. O fechamento
+oficial ainda não saiu (17:00; 18:00 na Cinzas), então essa passada não
+preenche preço nem manda resultado. O lembrete de entrada só vale até as
+10:00. O lembrete de saída, se o `run` das 16:00 já mandou, não repete. O
+programa não toma flock; o agendador do host deve usar o mesmo lock em todo
+`run`, `entry-reminder` e `exit-reminder`, para a passada das 16:00 e a das
+16:25 não disputarem o SQLite. Se as duas coincidirem mesmo assim, a chave
+única impede o segundo Telegram.
 
 O `run` das 8h às 22h cobre a entrega do documento e manda o alerta na hora
 em que a varredura vê o aviso. Compra no fechamento do mesmo dia tem de sair

@@ -106,9 +106,11 @@ def _ex_date(stated: date | None, data_com: date | None, calendar: Calendar) -> 
 def _counts_for_liquidity(row) -> bool:
     """Volume do Yahoo (em geral 0) não entra na média de 60 pregões.
 
-    O fechamento do Yahoo ainda pode ser o preço. O volume oficial chega
-    depois, no COTAHIST, e substitui a linha.
+    Linha só com abertura também não: o fechamento ainda não é o do pregão.
+    O volume oficial chega depois, no COTAHIST, e substitui a linha.
     """
+    if row["close"] is None:
+        return False
     source = str(row["source"] or "")
     if source.startswith("Yahoo"):
         return False
@@ -125,7 +127,10 @@ def _snapshot_from_rows(rows) -> Snapshot:
 
     volumes = [float(row["volume"]) for row in rows if _counts_for_liquidity(row)]
     average, count = average_volume(volumes)
-    last = rows[-1]
+    priced = [row for row in rows if row["close"] is not None]
+    if not priced:
+        return Snapshot(None, None, None, average, count)
+    last = priced[-1]
     return Snapshot(
         last_close=float(last["close"]),
         last_close_date=date.fromisoformat(last["session_date"]),
@@ -138,15 +143,18 @@ def _snapshot_from_rows(rows) -> Snapshot:
 def _price(store: Store, ticker: str, session: date, now: datetime, calendar: Calendar) -> tuple[float, str] | None:
     if aware(now) < calendar.close_at(session):
         return None
-    row = store.close_on(ticker, session.isoformat())
-    if row is not None:
+    row = store.quote_on(ticker, session.isoformat())
+    if row is not None and row["close"] is not None:
         return float(row["close"]), row["source"]
     yahoo = yahoo_close(ticker, session)
     if yahoo is None:
         return None
-    store.insert_quotes_if_absent(
-        [(ticker, session.isoformat(), yahoo, 0.0, "Yahoo Finance")]
-    )
+    if row is None:
+        store.insert_quotes_if_absent(
+            [(ticker, session.isoformat(), yahoo, 0.0, "Yahoo Finance")]
+        )
+    else:
+        store.set_close_if_absent(ticker, session.isoformat(), yahoo, 0.0, "Yahoo Finance")
     return yahoo, "Yahoo Finance (COTAHIST ainda não publicado)"
 
 
@@ -169,22 +177,34 @@ def _entry_price(
     row = store.quote_on(ticker, session.isoformat())
     if row is not None and row["open_price"] is not None:
         return float(row["open_price"]), row["source"]
-    closed, opened = yahoo_session(ticker, session)
+    _closed, opened = yahoo_session(ticker, session)
     if opened is None:
         return None
     label = "Yahoo Finance (abertura; COTAHIST ainda não publicado)"
+    # Só a abertura. O fechamento do Yahoo neste horário ainda é preço do
+    # dia; gravá-lo contaminaria o yield e a média até o COTAHIST chegar.
     if row is None:
         store.insert_quotes_if_absent(
-            [(ticker, session.isoformat(), closed if closed is not None else opened, 0.0, "Yahoo Finance", opened)]
+            [(ticker, session.isoformat(), None, 0.0, "Yahoo Finance", opened)]
         )
     else:
         store.set_open_if_absent(ticker, session.isoformat(), opened)
     return opened, label
 
 
-def _index_level(store: Store, session: date) -> tuple[float, str] | None:
+def _index_level(store: Store, session: date, *, price: str = "close") -> tuple[float, str] | None:
+    """Fechamento do Ibovespa, ou a abertura quando a entrada do papel é na abertura."""
     row = store.index_on(session.isoformat())
     if row is None:
+        return None
+    if price == "open":
+        if row["open_price"] is None:
+            return None
+        source = row["source"]
+        if "abertura" not in source:
+            source = f"{source} (abertura)"
+        return float(row["open_price"]), source
+    if row["close"] is None:
         return None
     return float(row["close"]), row["source"]
 
@@ -852,6 +872,17 @@ def _missed_deadline(cfg, store, report, ticker, company, issuer, kind, gross, n
     # Na hora exata o prazo já passou: 16:30 não é fechamento do dia, 10:00 não entra na abertura.
     if plan is None or aware(cfg.now) < plan.deadline:
         return False
+    # Aviso de antes das 16:30 que o ENET só mostra no dia seguinte (ou depois
+    # do corte) cai aqui quando a abertura já passou. O log mede a frequência;
+    # o sinal continua ignorado.
+    if plan.late_detection and not store.seen_event("deteccao_tardia", ticker, doc["protocol"]):
+        detail = (
+            f"{ticker} protocolo {doc['protocol']} entregue antes das 16:30 "
+            f"e visto em {aware(cfg.now).strftime('%d/%m/%Y %H:%M')}. "
+            f"A abertura de {plan.buy_date.isoformat()} já passou; compra não aberta."
+        )
+        store.log_event("deteccao_tardia", ticker=ticker, protocol=doc["protocol"], detail=detail)
+        log.info(detail)
     reason = "prazo de compra já passou"
     signal_key = _signal_key(ticker, kind, gross, data_com, approval, doc["protocol"])
     if store.signal_by_dedupe(signal_key) is None:
@@ -1175,7 +1206,8 @@ def _advance(cfg: Config, store: Store, calendar: Calendar, report: Report, *, r
         if status == "aguardando_compra" and entry_date is not None:
             filled = _entry_price(store, position["ticker"], entry_date, now, calendar, entry_type)
             if filled and not cfg.dry_run:
-                ibov = _index_level(store, entry_date)
+                ibov_price = "open" if entry_type == "abertura" else "close"
+                ibov = _index_level(store, entry_date, price=ibov_price)
                 store.update_position(
                     position["id"],
                     status="aberta",
@@ -1229,8 +1261,11 @@ def _close_position(cfg, store, report, position, filled_exit: tuple[float, str]
     net = float(position["net_per_share"]) if position["net_per_share"] is not None else None
     dividend = dividend_received(kind, gross, net, entry_date, data_com)
     result = trade_return(entry, exit_price, dividend)
-    ibov_entry = _index_level(store, entry_date)
-    ibov_exit = _index_level(store, exit_date)
+    entry_type = position["entry_type"] or "fechamento"
+    ibov_entry = _index_level(
+        store, entry_date, price="open" if entry_type == "abertura" else "close"
+    )
+    ibov_exit = _index_level(store, exit_date, price="close")
     ibov = None
     ibov_source = None
     if ibov_entry and ibov_exit:

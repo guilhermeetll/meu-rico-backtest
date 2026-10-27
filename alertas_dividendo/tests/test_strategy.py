@@ -467,6 +467,22 @@ def test_saud3_decision_matches_the_frozen_trade():
     assert decision.yld == 0.342059542 / 15.42
 
 
+def test_detection_cutoff_is_1629_for_the_close_and_1630_for_the_open():
+    """O corte da detecção é 16:30. 16:29 ainda compra o fechamento."""
+    delivered = _at(2026, 10, 21, 14, 0)
+    at_1629 = buy_plan(delivered, True, CAL, detected_at=_at(2026, 10, 21, 16, 29))
+    at_1630 = buy_plan(delivered, True, CAL, detected_at=_at(2026, 10, 21, 16, 30))
+    assert at_1629.entry_type == "fechamento"
+    assert at_1629.late_detection is False
+    assert at_1629.buy_date == _d(2026, 10, 21)
+    assert at_1629.deadline == _at(2026, 10, 21, 16, 30)
+    assert at_1630.entry_type == "abertura"
+    assert at_1630.entry_reason == "deteccao_tardia"
+    assert at_1630.late_detection is True
+    assert at_1630.buy_date == _d(2026, 10, 22)
+    assert at_1630.deadline == _at(2026, 10, 22, 10, 0)
+
+
 def test_late_detection_of_a_morning_notice_buys_the_next_open():
     """Aviso antes das 16:30, visto só depois: abertura do pregão seguinte."""
     delivered = _at(2026, 10, 21, 14, 0)

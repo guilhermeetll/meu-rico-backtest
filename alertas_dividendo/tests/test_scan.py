@@ -6,7 +6,16 @@ import pytest
 
 from alertas_dividendo.calendar import TZ, Calendar
 from alertas_dividendo.config import Config
-from alertas_dividendo.engine import Report, _advance, _scan, b3_matches, realized_returns
+from alertas_dividendo.engine import (
+    Report,
+    _advance,
+    _close_position,
+    _entry_price,
+    _scan,
+    _snapshot_from_rows,
+    b3_matches,
+    realized_returns,
+)
 from alertas_dividendo.strategy import exit_session
 from alertas_dividendo.store import Store
 
@@ -392,6 +401,125 @@ def test_holiday_and_weekend_notices_buy_the_next_open(tmp_path, monkeypatch):
         assert row["buy_date"] == "2026-10-26"
         assert any("Compra na abertura de 26/10/2026" in body for body in sent)
         _remind_and_fill_open(weekend_dir, store, sent, "2026-10-26", open_price=8.20, close_price=8.90)
+    finally:
+        store.close()
+
+
+def test_yahoo_open_does_not_store_an_intraday_close(tmp_path, monkeypatch):
+    """A abertura do Yahoo não grava o preço do dia como fechamento."""
+    monkeypatch.setattr("alertas_dividendo.engine.yahoo_session", lambda *_args, **_kwargs: (99.0, 11.0))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 21, 18, 0, tzinfo=TZ)
+    _seed(store, "9108", _DIVIDEND, published)
+    now = datetime(2026, 10, 22, 10, 5, tzinfo=TZ)
+    try:
+        filled = _entry_price(store, "ZZZZ3", date(2026, 10, 22), now, CAL, "abertura")
+        assert filled == (11.0, "Yahoo Finance (abertura; COTAHIST ainda não publicado)")
+        row = store.conn.execute(
+            "SELECT open_price, close, volume, source FROM quotes WHERE ticker='ZZZZ3' AND session_date='2026-10-22'"
+        ).fetchone()
+        assert row["open_price"] == 11.0
+        assert row["close"] is None
+        assert row["volume"] == 0.0
+        assert row["source"].startswith("Yahoo")
+        snap = _snapshot_from_rows(store.history("ZZZZ3", "2026-10-22"))
+        assert snap.last_close == 10.0
+        assert snap.last_close_date == date(2026, 10, 21)
+        assert snap.volume_sessions == 60
+        assert snap.avg_volume == 2_000_000
+    finally:
+        store.close()
+
+
+def test_open_entry_compares_with_the_ibov_open(tmp_path, monkeypatch):
+    monkeypatch.setattr("alertas_dividendo.engine.fetch_b3_splits", lambda _issuer: [])
+    store = Store(tmp_path / "alertas.sqlite")
+    try:
+        signal_id = store.insert_signal(
+            {
+                "dedupe_key": "ibov-abertura",
+                "protocol": "ibov-abertura",
+                "ticker": "ZZZZ3",
+                "issuer": "ZZZZ",
+                "status": "aguardando_compra",
+                "kind": "dividendo",
+                "gross_per_share": 0.5,
+                "data_com": "2026-10-22",
+                "entry_type": "abertura",
+                "created_at": "2026-10-21T19:00:00-03:00",
+            }
+        )
+        store.insert_position(
+            {
+                "signal_id": signal_id,
+                "ticker": "ZZZZ3",
+                "status": "aguardando_compra",
+                "entry_type": "abertura",
+                "entry_date": "2026-10-22",
+                "exit_date": "2026-10-23",
+                "data_com": "2026-10-22",
+                "kind": "dividendo",
+                "gross_per_share": 0.5,
+                "opened_at": "2026-10-21T19:00:00-03:00",
+            }
+        )
+        store.upsert_quotes([("ZZZZ3", "2026-10-22", 12.50, 2_000_000.0, "COTAHIST", 11.00)])
+        store.upsert_quotes([("ZZZZ3", "2026-10-23", 13.00, 2_000_000.0, "COTAHIST", 12.00)])
+        store.upsert_index("2026-10-22", 1100.0, "Yahoo Finance ^BVSP", open_price=1000.0)
+        store.upsert_index("2026-10-23", 1200.0, "Yahoo Finance ^BVSP", open_price=1110.0)
+        store.commit()
+        opening = _cfg(tmp_path, datetime(2026, 10, 22, 10, 5, tzinfo=TZ), dry_run=False)
+        _advance(opening, store, CAL, Report(now=opening.now, dry_run=False), reminders_only=False)
+        filled = store.conn.execute(
+            "SELECT entry_price, ibov_entry, ibov_source, status FROM positions"
+        ).fetchone()
+        assert filled["status"] == "aberta"
+        assert filled["entry_price"] == 11.00
+        assert filled["ibov_entry"] == 1000.0
+        assert "abertura" in filled["ibov_source"]
+        closing = _cfg(tmp_path, datetime(2026, 10, 23, 17, 5, tzinfo=TZ), dry_run=True)
+        report = Report(now=closing.now, dry_run=True)
+        position = store.conn.execute("SELECT * FROM positions").fetchone()
+        _close_position(
+            closing,
+            store,
+            report,
+            position,
+            (13.0, "COTAHIST"),
+        )
+        body = "\n".join(report.messages)
+        assert "RESULTADO" in body
+        # 1200 / 1000 - 1. O fechamento 1100 do dia da entrada não entra.
+        assert "+20,00%" in body
+    finally:
+        store.close()
+
+
+def test_next_day_sighting_of_a_morning_notice_is_logged_and_ignored(tmp_path, monkeypatch):
+    """Entregue antes das 16:30 e só visto no ENET no dia seguinte, depois da abertura."""
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 21, 14, 0, tzinfo=TZ)
+    _seed(store, "9109", _DIVIDEND, published)
+    cfg = _cfg(tmp_path, datetime(2026, 10, 22, 11, 0, tzinfo=TZ), dry_run=False)
+    try:
+        report = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, report)
+        assert sent == []
+        assert report.messages == []
+        signal = store.conn.execute(
+            "SELECT status, ignore_reason, entry_type FROM signals"
+        ).fetchone()
+        assert signal["status"] == "ignorado"
+        assert signal["ignore_reason"] == "prazo de compra já passou"
+        assert signal["entry_type"] == "abertura"
+        assert store.open_position_count() == 0
+        logged = store.conn.execute(
+            "SELECT detail FROM events WHERE reason='deteccao_tardia'"
+        ).fetchall()
+        assert len(logged) == 1
+        assert "16:30" in logged[0]["detail"]
     finally:
         store.close()
 
