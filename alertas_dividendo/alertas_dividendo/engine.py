@@ -504,6 +504,11 @@ def _emit_ticker(cfg, store, calendar, report, ticker, issuer, company, group, p
         signal_key = _signal_key(ticker, kind, None, data_com, approval, decision_doc["protocol"])
         if store.signal_by_dedupe(signal_key) is not None or store.conferir_exists(decision_doc["protocol"], ticker):
             return False
+        if _missed_deadline(
+            cfg, store, report, ticker, company, issuer, kind, None, None, decision, snap,
+            approval, data_com, data_ex, published, time_known, decision_doc,
+        ):
+            return False
         body = conferir_message(
             ticker=ticker,
             company=company,
@@ -525,18 +530,10 @@ def _emit_ticker(cfg, store, calendar, report, ticker, issuer, company, group, p
         return False
     plan = decision.plan
     assert plan is not None
-    if aware(cfg.now) > plan.deadline:
-        reason = "prazo de compra já passou"
-        signal_key = _signal_key(ticker, kind, gross, data_com, approval, decision_doc["protocol"])
-        if store.signal_by_dedupe(signal_key) is None:
-            line = f"{ticker} protocolo {decision_doc['protocol']} {reason}"
-            report.ignore(line)
-            store.log_event("prazo_passado", ticker=ticker, protocol=decision_doc["protocol"], detail=line)
-            if not cfg.dry_run:
-                _insert_signal(
-                    store, cfg, ticker, company, issuer, kind, gross, net, decision, snap,
-                    approval, data_com, data_ex, published, time_known, decision_doc, "ignorado", reason,
-                )
+    if _missed_deadline(
+        cfg, store, report, ticker, company, issuer, kind, gross, net, decision, snap,
+        approval, data_com, data_ex, published, time_known, decision_doc,
+    ):
         return False
     note = ""
     if data_com is not None and data_com <= cfg.now.date():
@@ -606,6 +603,25 @@ def _emit_ticker(cfg, store, calendar, report, ticker, issuer, company, group, p
     )
     key = f"compra|{ticker}|{kind}|{gross:.4f}|{approval.isoformat()}"
     _queue(cfg, store, report, key, "compra", signal_id, body)
+    return True
+
+
+def _missed_deadline(cfg, store, report, ticker, company, issuer, kind, gross, net, decision, snap, approval, data_com, data_ex, published, time_known, doc) -> bool:
+    """Prazo de compra vencido: grava `ignorado` e não avisa. Vale para compra e para conferir valor."""
+    plan = decision.plan
+    if plan is None or aware(cfg.now) <= plan.deadline:
+        return False
+    reason = "prazo de compra já passou"
+    signal_key = _signal_key(ticker, kind, gross, data_com, approval, doc["protocol"])
+    if store.signal_by_dedupe(signal_key) is None:
+        line = f"{ticker} protocolo {doc['protocol']} {reason}"
+        report.ignore(line)
+        store.log_event("prazo_passado", ticker=ticker, protocol=doc["protocol"], detail=line)
+        if not cfg.dry_run:
+            _insert_signal(
+                store, cfg, ticker, company, issuer, kind, gross, net, decision, snap,
+                approval, data_com, data_ex, published, time_known, doc, "ignorado", reason,
+            )
     return True
 
 

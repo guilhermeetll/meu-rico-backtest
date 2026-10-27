@@ -78,8 +78,10 @@ O `run` das 8h às 22h cobre a entrega do documento e a compra no pregão
 seguinte. O lembrete de venda sai na hora do call daquele pregão: desde as
 16:00 num dia comum (call 16:55) e desde as 17:00 na Quarta-feira de Cinzas
 (call 17:55, fechamento 18:00). O crontab das 16:55 não pega a Cinzas; o
-`run` das 17:00 pega. Um sinal cujo fechamento de compra já passou é ignorado
-(`prazo de compra já passou`) e não abre posição. O comando não vende de
+`run` das 17:00 pega. Cada lembrete sai uma vez por posição por dia, mesmo
+que o agendador chame `exit-reminder` de novo. Um sinal cujo fechamento de
+compra já passou — com valor lido ou em “conferir valor” — é ignorado
+(`prazo de compra já passou`) e não abre posição nem manda alerta. O comando não vende de
 verdade: só avisa.
 
 ## De onde vêm os documentos

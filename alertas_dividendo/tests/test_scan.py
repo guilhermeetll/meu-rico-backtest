@@ -1,6 +1,6 @@
 """Varredura duas vezes: extração falha não pode derrubar o SQLite, e prazo vencido não abre posição."""
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from alertas_dividendo.calendar import TZ, Calendar
 from alertas_dividendo.config import Config
@@ -57,8 +57,9 @@ def test_failed_extraction_scan_twice_does_not_crash(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
     store = Store(tmp_path / "alertas.sqlite")
-    published = datetime(2026, 10, 21, 18, 0, tzinfo=TZ)
+    published = datetime(2026, 10, 26, 18, 0, tzinfo=TZ)
     _seed(store, "9001", "Aviso aos acionistas sobre dividendos, sem valor por acao.", published)
+    # 26/10 depois do call: a compra é no fechamento de 27/10. Às 11h o prazo ainda está aberto.
     cfg = _cfg(tmp_path, datetime(2026, 10, 27, 11, 0, tzinfo=TZ), dry_run=False)
     try:
         first = Report(now=cfg.now, dry_run=False)
@@ -72,6 +73,36 @@ def test_failed_extraction_scan_twice_does_not_crash(tmp_path, monkeypatch):
         assert len(sent) == 1
         assert "CONFERIR VALOR" in sent[0]
         assert second.messages == []
+    finally:
+        store.close()
+
+
+def test_late_conferir_is_ignored_without_alert(tmp_path, monkeypatch):
+    """MTRE3 protocolo 1577530: publicado 15/10 18:00, compra no fechamento de 16/10."""
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 15, 18, 0, tzinfo=TZ)
+    _seed(store, "1577530", "Aviso de dividendos em tres parcelas, sem um unico valor por acao.", published)
+    cfg = _cfg(tmp_path, datetime(2026, 10, 27, 16, 0, tzinfo=TZ), dry_run=False)
+    try:
+        first = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, first)
+        assert sent == []
+        assert first.messages == []
+        assert any("1577530" in line and "prazo de compra já passou" in line for line in first.ignored)
+        signal = store.conn.execute(
+            "SELECT status, ignore_reason, buy_date FROM signals"
+        ).fetchone()
+        assert signal["status"] == "ignorado"
+        assert signal["ignore_reason"] == "prazo de compra já passou"
+        assert signal["buy_date"] == "2026-10-16"
+        assert store.open_position_count() == 0
+        second = Report(now=cfg.now, dry_run=False)
+        _scan(cfg, store, CAL, second)
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"] == 1
+        assert second.messages == []
+        assert sent == []
     finally:
         store.close()
 
@@ -173,5 +204,78 @@ def test_exit_reminder_waits_on_ash_wednesday(tmp_path):
         assert len(due_report.messages) == 1
         assert "LEMBRETE DE SAÍDA" in due_report.messages[0]
         assert "RESULTADO" not in due_report.messages[0]
+    finally:
+        store.close()
+
+
+def _position_on_exit(store: Store, exit_day: str, key: str) -> None:
+    signal_id = store.insert_signal(
+        {
+            "dedupe_key": key,
+            "protocol": key,
+            "ticker": "ZZZZ3",
+            "status": "aberta",
+            "kind": "dividendo",
+            "gross_per_share": 0.1,
+            "created_at": "2026-02-10T10:00:00-03:00",
+        }
+    )
+    store.insert_position(
+        {
+            "signal_id": signal_id,
+            "ticker": "ZZZZ3",
+            "status": "aberta",
+            "entry_date": "2026-02-10",
+            "entry_price": 10.0,
+            "entry_source": "teste",
+            "exit_date": exit_day,
+            "data_com": "2026-02-11",
+            "kind": "dividendo",
+            "gross_per_share": 0.1,
+            "opened_at": "2026-02-10T18:00:00-03:00",
+        }
+    )
+    store.insert_quotes_if_absent([("ZZZZ3", exit_day, 11.0, 2_000_000.0, "teste")])
+    store.commit()
+
+
+def test_exit_reminder_once_per_position_across_the_weekday_clocks(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *_args, **_kwargs: sent.append(_args[-1]))
+    monkeypatch.setattr(
+        "alertas_dividendo.engine.yahoo_close",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("yahoo")),
+    )
+    store = Store(tmp_path / "alertas.sqlite")
+    try:
+        _position_on_exit(store, "2026-10-22", "saida-comum")
+        for hour, minute in ((16, 0), (16, 55), (17, 0), (17, 55)):
+            cfg = _cfg(tmp_path, datetime(2026, 10, 22, hour, minute, tzinfo=TZ), dry_run=False)
+            _advance(cfg, store, CAL, Report(now=cfg.now, dry_run=False), reminders_only=True)
+        reminders = [body for body in sent if "LEMBRETE DE SAÍDA" in body]
+        assert len(reminders) == 1
+        stored = store.conn.execute(
+            "SELECT status FROM alerts WHERE kind='lembrete'"
+        ).fetchall()
+        assert len(stored) == 1
+        assert stored[0]["status"] == "sent"
+    finally:
+        store.close()
+
+
+def test_ash_wednesday_reminder_still_once_when_the_early_clocks_are_too_soon(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *_args, **_kwargs: sent.append(_args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    try:
+        _position_on_exit(store, "2026-02-18", "saida-cinzas")
+        for hour, minute in ((16, 0), (16, 55), (17, 0), (17, 55)):
+            cfg = _cfg(tmp_path, datetime(2026, 2, 18, hour, minute, tzinfo=TZ), dry_run=False)
+            report = Report(now=cfg.now, dry_run=False)
+            _advance(cfg, store, CAL, report, reminders_only=True)
+        reminders = [body for body in sent if "LEMBRETE DE SAÍDA" in body]
+        assert len(reminders) == 1
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM alerts WHERE kind='lembrete'").fetchone()["n"] == 1
+        assert store.conn.execute("SELECT status FROM positions").fetchone()["status"] == "aberta"
     finally:
         store.close()
