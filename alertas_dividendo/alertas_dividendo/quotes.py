@@ -49,7 +49,7 @@ def _download(name: str) -> str | None:
 def _ingest(store: Store, text: str, file_key: str) -> int:
     bars = parse_cotahist(text)
     rows = [
-        (bar.ticker, bar.session.strftime("%Y-%m-%d"), bar.close, bar.volume, "COTAHIST")
+        (bar.ticker, bar.session.strftime("%Y-%m-%d"), bar.close, bar.volume, "COTAHIST", bar.open)
         for bar in bars
     ]
     store.upsert_quotes(rows)
@@ -97,7 +97,7 @@ def ensure_cotahist(store: Store, calendar: Calendar, start: date, end: date) ->
         log.info("%s: %s barras", name, count)
 
 
-def _yahoo(symbol: str, start: date, end: date) -> list[tuple[date, float]]:
+def _yahoo(symbol: str, start: date, end: date) -> list[tuple[date, float, float | None]]:
     period1 = int(datetime.combine(start - timedelta(days=5), datetime.min.time(), tzinfo=TZ).timestamp())
     period2 = int(datetime.combine(end + timedelta(days=2), datetime.min.time(), tzinfo=TZ).timestamp())
     url = YAHOO_URL.format(symbol=quote(symbol, safe=""), start=period1, end=period2)
@@ -112,28 +112,43 @@ def _yahoo(symbol: str, start: date, end: date) -> list[tuple[date, float]]:
     if not result:
         return []
     block = result[0]
+    quote = ((block.get("indicators") or {}).get("quote") or [{}])[0]
     stamps = block.get("timestamp") or []
-    closes = ((block.get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
-    out: list[tuple[date, float]] = []
-    for stamp, close in zip(stamps, closes):
+    closes = quote.get("close") or []
+    opens = quote.get("open") or []
+    out: list[tuple[date, float, float | None]] = []
+    for index, stamp in enumerate(stamps):
+        close = closes[index] if index < len(closes) else None
         if close is None:
             continue
+        opened = opens[index] if index < len(opens) else None
         session = datetime.fromtimestamp(int(stamp), TZ).date()
-        out.append((session, float(close)))
+        out.append((session, float(close), None if opened is None else float(opened)))
     return out
 
 
 def ensure_index(store: Store, start: date, end: date) -> None:
     """Ibovespa via Yahoo ^BVSP. O índice não vem no COTAHIST de ações."""
-    for session, close in _yahoo("^BVSP", start, end):
+    for session, close, _opened in _yahoo("^BVSP", start, end):
         if session < start or session > end:
             continue
         store.upsert_index(session.isoformat(), close, "Yahoo Finance ^BVSP")
 
 
-def yahoo_close(ticker: str, session: date) -> float | None:
+def yahoo_session(ticker: str, session: date) -> tuple[float | None, float | None]:
+    """Fechamento e abertura do pregão no Yahoo. `(None, None)` se não houver barra."""
     bars = _yahoo(f"{ticker}.SA", session, session)
-    for day, close in bars:
+    for day, close, opened in bars:
         if day == session:
-            return close
-    return None
+            return close, opened
+    return None, None
+
+
+def yahoo_close(ticker: str, session: date) -> float | None:
+    close, _opened = yahoo_session(ticker, session)
+    return close
+
+
+def yahoo_open(ticker: str, session: date) -> float | None:
+    _close, opened = yahoo_session(ticker, session)
+    return opened

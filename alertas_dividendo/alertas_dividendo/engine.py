@@ -23,13 +23,14 @@ from alertas_dividendo.messages import (
     captcha_message,
     conferir_message,
     corrected_value_message,
+    entry_reminder_message,
     exit_message,
     result_message,
     update_dates_message,
     with_disclaimer,
 )
 from alertas_dividendo.pdftext import pdf_variants
-from alertas_dividendo.quotes import ensure_cotahist, ensure_index, yahoo_close
+from alertas_dividendo.quotes import ensure_cotahist, ensure_index, yahoo_close, yahoo_session
 from alertas_dividendo.sources import (
     CaptchaRequired,
     download_pdf,
@@ -45,9 +46,8 @@ from alertas_dividendo.strategy import (
     aware,
     buy_plan,
     cumulative_result,
-    last_close_session,
-    yield_close_action,
     dividend_received,
+    entry_reminder_due,
     index_return,
     jcp_net,
     passes_liquidity,
@@ -135,20 +135,6 @@ def _snapshot_from_rows(rows) -> Snapshot:
     )
 
 
-def _closes_for_yield(store: Store, ticker: str, reference: date, now: datetime, calendar: Calendar):
-    """Barras até o fechamento de referência, e se esse fechamento já é oficial.
-
-    Uma cotação gravada antes do call não conta: o backtest usa o fechamento.
-    """
-    rows = list(store.history(ticker, reference.isoformat()))
-    if not rows:
-        return rows, False
-    last_day = date.fromisoformat(rows[-1]["session_date"])
-    if last_day == reference and aware(now) < calendar.close_at(reference):
-        return rows[:-1], False
-    return rows, last_day == reference
-
-
 def _price(store: Store, ticker: str, session: date, now: datetime, calendar: Calendar) -> tuple[float, str] | None:
     if aware(now) < calendar.close_at(session):
         return None
@@ -162,6 +148,38 @@ def _price(store: Store, ticker: str, session: date, now: datetime, calendar: Ca
         [(ticker, session.isoformat(), yahoo, 0.0, "Yahoo Finance")]
     )
     return yahoo, "Yahoo Finance (COTAHIST ainda não publicado)"
+
+
+def _entry_price(
+    store: Store,
+    ticker: str,
+    session: date,
+    now: datetime,
+    calendar: Calendar,
+    entry_type: str,
+) -> tuple[float, str] | None:
+    """Fechamento depois do call, ou abertura depois do leilão de abertura.
+
+    Posição antiga sem tipo entra no fechamento.
+    """
+    if entry_type != "abertura":
+        return _price(store, ticker, session, now, calendar)
+    if aware(now) < calendar.open_at(session):
+        return None
+    row = store.quote_on(ticker, session.isoformat())
+    if row is not None and row["open_price"] is not None:
+        return float(row["open_price"]), row["source"]
+    closed, opened = yahoo_session(ticker, session)
+    if opened is None:
+        return None
+    label = "Yahoo Finance (abertura; COTAHIST ainda não publicado)"
+    if row is None:
+        store.insert_quotes_if_absent(
+            [(ticker, session.isoformat(), closed if closed is not None else opened, 0.0, "Yahoo Finance", opened)]
+        )
+    else:
+        store.set_open_if_absent(ticker, session.isoformat(), opened)
+    return opened, label
 
 
 def _index_level(store: Store, session: date) -> tuple[float, str] | None:
@@ -548,25 +566,25 @@ def _scan(cfg: Config, store: Store, calendar: Calendar, report: Report) -> None
         earliest = min(group, key=lambda doc: doc["published_at"])
         time_known = bool(earliest["time_known"])
         published = _parse_dt(earliest["published_at"])
-        plan = buy_plan(published, time_known, calendar)
-        yield_session = last_close_session(published.date(), calendar)
+        plan = buy_plan(published, time_known, calendar, detected_at=cfg.now)
+        yield_session = last_final_session(cfg.now, calendar)
         liquid = []
         for ticker in tickers:
-            bars, ready = _closes_for_yield(store, ticker, yield_session, cfg.now, calendar)
-            action = yield_close_action(cfg.now, yield_session, plan.deadline, ready, calendar)
-            if action == "esperar":
-                line = (
-                    f"{ticker} protocolo {earliest['protocol']} aguardando fechamento de "
-                    f"{yield_session.isoformat()} para o yield"
+            if plan.late_detection and not store.seen_event("deteccao_tardia", ticker, earliest["protocol"]):
+                detail = (
+                    f"{ticker} protocolo {earliest['protocol']} entregue antes das 16:30 "
+                    f"e visto em {aware(cfg.now).strftime('%d/%m/%Y %H:%M')}. "
+                    f"Tarde para o fechamento do mesmo dia; compra na abertura de "
+                    f"{plan.buy_date.isoformat()}."
                 )
-                report.ignore(line)
                 store.log_event(
-                    "aguardando_fechamento",
+                    "deteccao_tardia",
                     ticker=ticker,
                     protocol=earliest["protocol"],
-                    detail=line,
+                    detail=detail,
                 )
-                continue
+                log.info(detail)
+            bars = list(store.history(ticker, yield_session.isoformat()))
             snap = _snapshot_from_rows(bars)
             gate = passes_liquidity(snap.avg_volume, snap.volume_sessions)
             if gate != "ok":
@@ -578,22 +596,22 @@ def _scan(cfg: Config, store: Store, calendar: Calendar, report: Report) -> None
                 report.ignore(line)
                 store.log_event(gate, ticker=ticker, protocol=earliest["protocol"], detail=line)
                 continue
-            liquid.append((ticker, snap, ready))
+            liquid.append((ticker, snap))
         if not liquid:
             continue
         texts = {doc["protocol"]: _document_text_cfg(cfg, store, doc, published.date()) for doc in group}
-        for ticker, snap, ready in liquid:
+        for ticker, snap in liquid:
             events = _cash_events(group, texts, ticker, published.date())
             if not events:
                 _emit_ticker(
                     cfg, store, calendar, report, ticker, issuer, company, group, None, None,
-                    snap, published, time_known, open_slots, yield_session, ready,
+                    snap, published, time_known, open_slots, yield_session,
                 )
                 continue
             for source_doc, dist in events:
                 opened = _emit_ticker(
                     cfg, store, calendar, report, ticker, issuer, company, group, source_doc, dist,
-                    snap, published, time_known, open_slots, yield_session, ready,
+                    snap, published, time_known, open_slots, yield_session,
                 )
                 if opened:
                     open_slots += 1
@@ -656,7 +674,7 @@ def _cash_events(group, texts, ticker: str, published: date) -> list[tuple[dict,
 
 def _emit_ticker(
     cfg, store, calendar, report, ticker, issuer, company, group, source_doc, dist, snap, published, time_known,
-    open_slots, reference: date, reference_ready: bool,
+    open_slots, reference: date,
 ) -> bool:
     earliest = min(group, key=lambda doc: doc["published_at"])
     approval = date.fromisoformat(earliest["reference_date"]) if earliest["reference_date"] else published.date()
@@ -699,6 +717,7 @@ def _emit_ticker(
         open_positions=open_slots,
         priors=priors,
         calendar=calendar,
+        detected_at=cfg.now,
     )
     if decision.action == "ignorar":
         yld = f" yield={decision.yld:.4f}" if decision.yld is not None else ""
@@ -770,8 +789,10 @@ def _emit_ticker(
         published_at=published,
         time_known=time_known,
         timing=plan.timing,
-        reference_close_date=reference,
-        reference_close_used=reference_ready and snap.last_close_date == reference,
+        reference_close_date=snap.last_close_date or reference,
+        reference_close_used=False,
+        entry_type=plan.entry_type,
+        entry_reason=plan.entry_reason,
         data_com=data_com,
         data_ex=data_ex,
         buy_date=plan.buy_date,
@@ -798,6 +819,7 @@ def _emit_ticker(
             "signal_id": signal_id,
             "ticker": ticker,
             "status": "aguardando_compra",
+            "entry_type": plan.entry_type,
             "entry_date": plan.buy_date.isoformat(),
             "entry_price": None,
             "entry_source": None,
@@ -827,7 +849,8 @@ def _emit_ticker(
 def _missed_deadline(cfg, store, report, ticker, company, issuer, kind, gross, net, decision, snap, approval, data_com, data_ex, published, time_known, doc) -> bool:
     """Prazo de compra vencido: grava `ignorado` e não avisa. Vale para compra e para conferir valor."""
     plan = decision.plan
-    if plan is None or aware(cfg.now) <= plan.deadline:
+    # Na hora exata o prazo já passou: 16:30 não é fechamento do dia, 10:00 não entra na abertura.
+    if plan is None or aware(cfg.now) < plan.deadline:
         return False
     reason = "prazo de compra já passou"
     signal_key = _signal_key(ticker, kind, gross, data_com, approval, doc["protocol"])
@@ -866,6 +889,7 @@ def _insert_signal(store, cfg, ticker, company, issuer, kind, gross, net, decisi
             "published_at": published.isoformat(timespec="minutes"),
             "time_known": 1 if time_known else 0,
             "timing": plan.timing if plan else "",
+            "entry_type": plan.entry_type if plan else None,
             "buy_date": plan.buy_date.isoformat() if plan else None,
             "buy_deadline": plan.deadline.isoformat(timespec="minutes") if plan else None,
             "exit_date": decision.exit_date.isoformat() if decision.exit_date else None,
@@ -874,7 +898,7 @@ def _insert_signal(store, cfg, ticker, company, issuer, kind, gross, net, decisi
             "document_url": doc["url"],
             "category": doc["category"],
             "subject": doc["subject"],
-            "late": 1 if plan and aware(cfg.now) > plan.deadline else 0,
+            "late": 1 if plan and aware(cfg.now) >= plan.deadline else 0,
             "created_at": cfg.now.isoformat(timespec="seconds"),
         }
     )
@@ -1128,8 +1152,28 @@ def _advance(cfg: Config, store: Store, calendar: Calendar, report: Report, *, r
         _flag_split(cfg, store, report, position)
         status = position["status"]
         entry_date = date.fromisoformat(position["entry_date"]) if position["entry_date"] else None
+        entry_type = position["entry_type"] or "fechamento"
+        if (
+            status == "aguardando_compra"
+            and entry_date is not None
+            and entry_reminder_due(now, entry_date, entry_type)
+        ):
+            body = entry_reminder_message(
+                ticker=position["ticker"],
+                buy_date=entry_date,
+                simulacao=cfg.simulacao,
+            )
+            _queue(
+                cfg,
+                store,
+                report,
+                f"entrada|{position['id']}|{entry_date.isoformat()}",
+                "entrada",
+                position["signal_id"],
+                body,
+            )
         if status == "aguardando_compra" and entry_date is not None:
-            filled = _price(store, position["ticker"], entry_date, now, calendar)
+            filled = _entry_price(store, position["ticker"], entry_date, now, calendar, entry_type)
             if filled and not cfg.dry_run:
                 ibov = _index_level(store, entry_date)
                 store.update_position(
@@ -1261,7 +1305,7 @@ def execute(cfg: Config, command: str) -> Report:
             _scan(cfg, store, calendar, report)
             store.commit()
             _advance(cfg, store, calendar, report, reminders_only=False)
-        elif command == "exit-reminder":
+        elif command in {"exit-reminder", "entry-reminder"}:
             _advance(cfg, store, calendar, report, reminders_only=True)
         store.commit()
     finally:

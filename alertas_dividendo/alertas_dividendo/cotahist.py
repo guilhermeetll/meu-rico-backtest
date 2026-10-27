@@ -20,6 +20,7 @@ class Bar:
     session: datetime
     close: float
     volume: float
+    open: float | None = None
 
     @property
     def session_date(self):
@@ -39,6 +40,7 @@ def parse_cotahist(text: str) -> list[Bar]:
             continue
         try:
             factor = int(line[210:217]) or 1
+            opened = int(line[56:69]) / 100 / factor
             close = int(line[108:121]) / 100 / factor
             volume = int(line[170:188]) / 100
             session = datetime.strptime(line[2:10], "%Y%m%d")
@@ -48,7 +50,13 @@ def parse_cotahist(text: str) -> list[Bar]:
             continue
         key = (ticker, line[2:10])
         current = found.get(key)
-        bar = Bar(ticker=ticker, session=session, close=close, volume=volume)
+        bar = Bar(
+            ticker=ticker,
+            session=session,
+            close=close,
+            volume=volume,
+            open=opened if opened > 0 else None,
+        )
         if current is None or bar.volume >= current.volume:
             found[key] = bar
     return list(found.values())
@@ -61,11 +69,17 @@ def build_quote_line(
     volume: float,
     *,
     factor: int = 1,
+    open_price: float | None = None,
 ) -> str:
-    """Linha 01 sintética para os testes. Os campos não usados ficam zerados."""
+    """Linha 01 sintética para os testes. Os campos não usados ficam zerados.
+
+    PREABE é o primeiro preço (abertura). PREULT, o quinto, continua o
+    fechamento. Sem `open_price`, a abertura repete o fechamento.
+    """
     def price(value: float) -> str:
         return f"{int(round(value * 100 * factor)):013d}"
 
+    opened = close if open_price is None else open_price
     line = ["0"] * 245
     raw = (
         "01"
@@ -77,7 +91,7 @@ def build_quote_line(
         + f"{'ON      NM':<10}"
         + "000"
         + "R$  "
-        + price(close)
+        + price(opened)
         + price(close)
         + price(close)
         + price(close)

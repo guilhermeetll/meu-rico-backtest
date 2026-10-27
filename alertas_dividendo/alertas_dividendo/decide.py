@@ -9,12 +9,10 @@ from alertas_dividendo.calendar import Calendar
 from alertas_dividendo.strategy import (
     MAX_POSITIONS,
     BuyPlan,
-    aware,
     buy_plan,
     classify_yield,
     exit_session,
     has_rights,
-    last_close_session,
     passes_liquidity,
     same_cash_event,
     yield_ratio,
@@ -75,10 +73,10 @@ def decide(
     open_positions: int,
     priors: list[Prior],
     calendar: Calendar,
+    detected_at: datetime | None = None,
 ) -> Decision:
     """Aplica as regras na ordem: duplicata, liquidez, valor, yield, direito, vaga."""
-    published_day = aware(published_at).date()
-    plan = buy_plan(published_at, time_known, calendar)
+    plan = buy_plan(published_at, time_known, calendar, detected_at=detected_at)
     if gross is not None:
         for prior in priors:
             if prior.kind != kind:
@@ -146,7 +144,7 @@ def decide(
         return Decision("ignorar", "carteira_cheia", yld=yld, plan=plan)
 
     exit_date = exit_session(data_com, calendar) if data_com else None
-    price_session = last_close_session(published_day, calendar)
+    price_session = plan.buy_date
     return Decision(
         "comprar",
         "ok",

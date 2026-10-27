@@ -175,6 +175,11 @@ class Calendar:
         window = datetime.combine(session, time(hours.call_start.hour, 0), tzinfo=TZ)
         return local >= window
 
+    def open_at(self, session: date) -> datetime:
+        """Abertura do pregão. Comum 10:00; Quarta de Cinzas 13:00."""
+        hours = self.hours(session)
+        return datetime.combine(session, hours.open, tzinfo=TZ)
+
     def close_at(self, session: date) -> datetime:
         hours = self.hours(session)
         return datetime.combine(session, hours.close, tzinfo=TZ)

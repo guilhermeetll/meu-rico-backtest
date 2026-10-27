@@ -265,7 +265,11 @@ def test_cotahist_roundtrip():
     assert len(bars) == 1
     assert bars[0].ticker == "SAUD3"
     assert bars[0].close == 15.42
+    assert bars[0].open == 15.42
     assert bars[0].volume == 70_354_057.0
+    opened = build_quote_line("20261021", "SAUD3", 15.42, 70_354_057.0, open_price=15.10)
+    assert parse_cotahist(opened + "\n")[0].open == 15.10
+    assert parse_cotahist(opened + "\n")[0].close == 15.42
     assert bars[0].session_date == date(2026, 10, 21)
 
 
@@ -303,10 +307,10 @@ def test_messages_carry_simulacao_and_jcp_net():
     assert body.startswith("SIMULAÇÃO")
     assert "líquido" in body
     assert "último fechamento disponível" in body
-    assert "22/10/2026" in body
+    assert "Compra na abertura de 22/10/2026" in body
     assert "depois do fechamento" in body
     assert "0,850000" in body
-    assert "ordem limitada" in body
+    assert "leilão de abertura" in body
     assert DISCLAIMER.split("—")[0].strip() in body
     hidden = result_message(
         ticker="SAUD3",

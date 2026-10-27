@@ -50,6 +50,7 @@ python -m alertas_dividendo run --dry-run          # varre e imprime, não envia
 python -m alertas_dividendo run --hoje --dry-run   # só o dia de hoje no ENET
 python -m alertas_dividendo run                    # envia o que estiver no prazo
 python -m alertas_dividendo exit-reminder          # lembrete de venda perto do call
+python -m alertas_dividendo entry-reminder         # lembrete de compra na abertura, antes das 10h
 python -m alertas_dividendo status
 ```
 
@@ -71,18 +72,26 @@ ALERTAS_DATA_DIR=/var/lib/alertas_dividendo
 TELEGRAM_BOT_TOKEN=coloque_o_token
 TELEGRAM_CHAT_ID=coloque_o_chat
 0 8-22 * * 1-5 cd /opt/alertas_dividendo && /opt/alertas_dividendo/.venv/bin/python -m alertas_dividendo run
+0 9 * * 1-5 cd /opt/alertas_dividendo && /opt/alertas_dividendo/.venv/bin/python -m alertas_dividendo entry-reminder
 55 16 * * 1-5 cd /opt/alertas_dividendo && /opt/alertas_dividendo/.venv/bin/python -m alertas_dividendo exit-reminder
 ```
 
-O `run` das 8h às 22h cobre a entrega do documento e a compra no pregão
-seguinte. O lembrete de venda sai na hora do call daquele pregão: desde as
-16:00 num dia comum (call 16:55) e desde as 17:00 na Quarta-feira de Cinzas
-(call 17:55, fechamento 18:00). O crontab das 16:55 não pega a Cinzas; o
-`run` das 17:00 pega. Cada lembrete sai uma vez por posição por dia, mesmo
-que o agendador chame `exit-reminder` de novo. Um sinal cujo fechamento de
-compra já passou — com valor lido ou em “conferir valor” — é ignorado
-(`prazo de compra já passou`) e não abre posição nem manda alerta. O comando não vende de
-verdade: só avisa.
+O `scheduler.py` do servidor fica fora deste repositório. Ele precisa do job
+das 9h com `python -m alertas_dividendo entry-reminder`, ao lado do
+`exit-reminder` das 16:55. O `run` das 8h também cai na janela do lembrete de
+entrada (8:00 inclusive até 10:00) e o aviso sai uma vez só.
+
+O `run` das 8h às 22h cobre a entrega do documento e manda o alerta na hora
+em que a varredura vê o aviso. Compra no fechamento do mesmo dia tem de sair
+nessa passada, antes do call. Compra na abertura do pregão seguinte leva o
+lembrete antes das 10:00 do dia da entrada. O lembrete de venda sai na hora
+do call daquele pregão: desde as 16:00 num dia comum (call 16:55) e desde as
+17:00 na Quarta-feira de Cinzas (call 17:55, fechamento 18:00). O crontab das
+16:55 não pega a Cinzas; o `run` das 17:00 pega. Cada lembrete sai uma vez
+por posição por dia. Um sinal cujo prazo de compra já passou — fechamento às
+16:30 ou abertura às 10:00 (13:00 na Cinzas), com valor lido ou em “conferir
+valor” — é ignorado (`prazo de compra já passou`) e não abre posição nem
+manda alerta. O comando não compra nem vende de verdade: só avisa.
 
 ## De onde vêm os documentos
 
@@ -96,20 +105,30 @@ que cruza o mês vira um pedido por mês, com pausa de 5 segundos entre eles.
 Se o serviço responder 500, há uma pausa e uma segunda tentativa. Se pedir
 captcha, para na hora, sem repetir.
 
-A hora da entrega fica só no log e na mensagem (durante o pregão, depois do
-fechamento, antes da abertura). Ela não muda a compra nem o yield.
+A hora de entrega no ENET, em `America/Sao_Paulo`, escolhe a entrada:
 
-A compra é sempre o fechamento do pregão seguinte à data de publicação,
-mesmo se o aviso sair no meio do pregão. Compra no mesmo dia não foi testada.
+- Antes das 16:30 num pregão, e a varredura vê o aviso nesse mesmo dia antes
+  das 16:30: compra no fechamento desse dia. O alerta sai na hora da
+  detecção, para a ordem entrar antes do call (16:55; na Cinzas, 17:55).
+- Às 16:30 ou depois, em dia sem pregão (fim de semana ou feriado) ou sem
+  hora na fonte: compra na abertura do pregão seguinte. O alerta sai na
+  detecção. No dia da entrada sai um lembrete antes das 10:00 (na Cinzas a
+  abertura é às 13:00; o lembrete continua antes das 10:00).
+- Aviso entregue antes das 16:30 mas só visto às 16:30 ou depois: já não dá
+  para comprar o fechamento daquele dia. A compra passa para a abertura do
+  pregão seguinte e o log grava `deteccao_tardia`.
 
-O yield do backtest (rodada 9, refeita na rodada 11 em `dividendo_atraso_cvm.py`)
-é o valor por ação dividido pelo fechamento de entrada: `y = valor / C[s0]`,
-com `s0 = searchsorted(data, side='right')` — o primeiro pregão depois da
-data. Esse fechamento só existe no call da compra, que é depois do prazo do
-alerta. O aviso sai antes, com o último fechamento já publicado, e o texto
-diz que não é o preço de entrada. Se o fechamento de referência pudesse sair
-antes desse prazo e ainda não estivesse na base, a varredura espera a hora
-seguinte e não grava o sinal.
+16:30 em ponto já é tarde para o fechamento do dia. O call começa às 16:55
+(17:55 na Cinzas), então 16:30 ainda deixa tempo de colocar a ordem. O corte
+não acompanha o call da Cinzas.
+
+A tela de yield (2% inclusive, menos de 30%) usa o último fechamento já
+publicado. O preço de entrada ainda não existe quando o alerta tem de sair:
+o fechamento do dia imprime às 17:00, depois das 16:30, e a abertura imprime
+na manhã seguinte. A varredura não espera esse preço. O retorno simulado,
+quando o pregão imprime, usa o fechamento ou a abertura do dia da entrada,
+conforme o tipo. A saída não muda: fechamento do 20º pregão depois da
+data-com. O Ibovespa da comparação continua no fechamento do pregão.
 
 Se a CVM responder `SolicitarCaptcha = S`, o comando para, grava o dia, manda
 um aviso no Telegram e não consulta o ENET de novo até o dia seguinte. O aviso
@@ -128,7 +147,7 @@ mensagem de saída; o preço não é ajustado.
 
 Parcelas com data-com diferente são eventos separados: cada uma enfrenta o
 piso de 2% sozinha, com a própria saída (20 pregões depois da sua data-com).
-A compra continua sendo o pregão seguinte à publicação do aviso. Valores só
+A entrada segue a hora de entrega do aviso, não a data-com da parcela. Valores só
 se somam quando caem na mesma data-com (dividendo e JCP pagos juntos). O
 yield desse total usa o bruto; o caixa recebido retém 15% só na parte de JCP.
 Um mesmo R$/ação só é duplicata se a data-com for a mesma, ou se o aviso
@@ -145,19 +164,22 @@ direito ainda não estão confirmados.
 ## Regras (não alterar)
 
 1. Gatilho: dividendo ou JCP tornado público na CVM (aviso ou ata).
-2. Rendimento de 2% inclusive até menos de 30% sobre o fechamento de entrada
-   (o mesmo pregão da compra). 30% exato não passa, como no backtest (`y < 0,30`).
-   No JCP o rendimento usa o valor bruto; o alerta mostra também o
-   líquido (15% retido). Se esse fechamento ainda não saiu, o alerta usa o
-   último disponível e rotula a data. O resultado acumulado ignora custos,
-   impostos e o CDI do caixa parado.
+2. Rendimento de 2% inclusive até menos de 30% sobre o último fechamento
+   disponível na hora do alerta. 30% exato não passa (`y < 0,30`). No JCP o
+   rendimento usa o valor bruto; o alerta mostra também o líquido (15% retido).
+   O retorno simulado usa o fechamento ou a abertura do dia da entrada, quando
+   esse preço sai. O resultado acumulado ignora custos, impostos e o CDI do
+   caixa parado.
 3. Volume financeiro médio de 60 pregões de pelo menos R$ 1 milhão.
-4. Compra no fechamento do primeiro pregão depois do anúncio. O alerta tem de
-   chegar antes desse call.
+4. Entrada pela hora de entrega. Antes das 16:30 num pregão, vista a tempo:
+   fechamento desse dia. Às 16:30 ou depois, dia sem pregão, fonte sem hora
+   ou detecção tardia: abertura do pregão seguinte, com lembrete antes das
+   10:00. A detecção tardia fica no log.
 5. Venda no fechamento do 20º pregão depois da data-com. A posição precisa
    estar aberta na data-com.
 6. No máximo 10 posições, peso igual. A 11ª é ignorada e registrada.
-7. O texto pede ordem limitada perto do fechamento e corretora sem corretagem.
+7. No fechamento, ordem limitada perto do call. Na abertura, ordem no leilão
+   de abertura. Corretora sem corretagem.
 
 Se o PDF não entregar o valor por ação, o alerta sai mesmo assim, marcado
 **conferir valor**.
