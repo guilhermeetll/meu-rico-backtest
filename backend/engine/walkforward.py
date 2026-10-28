@@ -59,6 +59,7 @@ def run_walk_forward(
     n_trials: int,
     bar_minutes: int,
     config: WalkForwardConfig,
+    trades=None,
 ) -> tuple[WalkForwardResult, list[str]]:
     from engine.backtest import execute
 
@@ -91,9 +92,9 @@ def run_walk_forward(
         best_params = combos[0]
         best_score: float | None = None
         for candidate in combos:
-            raw, _, _ = strategy.generate(train_bars, candidate, instrument, bar_minutes)
-            trades = execute(raw, instrument, costs, symbol)
-            metrics, _ = performance(trades, train_dates, initial_capital, tax_rate, n_trials=1)
+            raw, _, _ = strategy.generate(train_bars, candidate, instrument, bar_minutes, trades=trades)
+            filled = execute(raw, instrument, costs, symbol)
+            metrics, _ = performance(filled, train_dates, initial_capital, tax_rate, n_trials=1)
             score = _score(metrics, metric_name)
             if score is None:
                 continue
@@ -110,7 +111,7 @@ def run_walk_forward(
             used_dates.add(day)
         if fresh:
             test_bars = _filter(bars, fresh)
-            raw, _, _ = strategy.generate(test_bars, best_params, instrument, bar_minutes)
+            raw, _, _ = strategy.generate(test_bars, best_params, instrument, bar_minutes, trades=trades)
             test_trades = execute(raw, instrument, costs, symbol)
             oos_trades.extend(test_trades)
             oos_sessions.extend(fresh)

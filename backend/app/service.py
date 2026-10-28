@@ -50,6 +50,7 @@ def execute_backtest(payload: BacktestInput) -> dict:
         bar_minutes=TIMEFRAME_MINUTES[payload.timeframe],
         sample_split=split,
         walk_forward=forward,
+        trades=loaded.trades,
     )
     warnings = list(loaded.warnings) + list(result.warnings) + calendar_warnings(payload.start, payload.end)
     return _serialize(payload, instrument, costs, result, warnings)
@@ -71,6 +72,7 @@ def execute_study(payload: StudyInput) -> dict:
         bar_minutes=TIMEFRAME_MINUTES[payload.timeframe],
         sample_split=split,
         walk_forward=forward,
+        trades=loaded.trades,
     )
     bodies = []
     for params, result in results:
