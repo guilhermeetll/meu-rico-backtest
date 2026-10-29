@@ -362,3 +362,166 @@ def test_messages_carry_simulacao_and_jcp_net():
         simulacao=True,
     )
     assert "ATENÇÃO: a data-com não é conhecida antes desta compra" in missing_com
+
+
+OLDER_IN_WORDS = """
+Anteriormente, no exercício anterior, foram pagos R$ 1,20 (um real e vinte centavos) por ação em 2025.
+O Conselho deliberou aprovar dividendos de R$ 0,30 por ação.
+Farão jus os detentores de ações em 30 de outubro de 2026.
+"""
+
+
+def test_older_dividend_quoted_in_words_is_not_added():
+    found = extract_distributions(OLDER_IN_WORDS, ticker="ZZZZ3", published=date(2026, 10, 21))
+    assert len(found) == 1
+    assert abs(found[0].gross - 0.30) < 1e-9
+    assert found[0].data_com == date(2026, 10, 30)
+    repro = (
+        "pagos R$ 1,20 (um real e vinte centavos) por ação em 2025… agora R$ 0,30 por ação. "
+        "O Conselho deliberou. Farão jus os detentores de ações em 30 de outubro de 2026."
+    )
+    again = extract_distributions(repro, ticker="ZZZZ3", published=date(2026, 10, 21))
+    assert len(again) == 1
+    assert abs(again[0].gross - 0.30) < 1e-9
+
+
+MILLION_TOTAL = """
+O Conselho aprovou o montante de R$ 666.970.975,26 (seiscentos e sessenta e seis milhões de reais) por ação.
+Farão jus os detentores de ações em 10 de novembro de 2026.
+"""
+
+MILLION_AND_PER_SHARE = """
+O Conselho aprovou o montante de R$ 666.970.975,26 (seiscentos e sessenta e seis milhões) por ação,
+correspondente a R$ 0,34 por ação.
+Farão jus os detentores de ações em 10 de novembro de 2026.
+"""
+
+
+def test_millions_total_followed_by_per_share_is_not_the_dividend():
+    assert extract_distributions(MILLION_TOTAL, ticker="GGBR4", published=date(2026, 10, 27)) == []
+    found = extract_distributions(MILLION_AND_PER_SHARE, ticker="GGBR4", published=date(2026, 10, 27))
+    assert len(found) == 1
+    assert abs(found[0].gross - 0.34) < 1e-9
+
+
+UNIT_ONLY = """
+Aprovaram dividendos de R$ 0,90 por unit.
+Farão jus os detentores de ações em 30 de outubro de 2026.
+"""
+
+UNIT_WITH_BOTH_CLASSES = """
+Aprovaram dividendos de R$ 0,90 por unit, ordinárias e preferenciais.
+Farão jus os detentores de ações em 30 de outubro de 2026.
+"""
+
+
+def test_unit_value_is_not_applied_to_on_or_pn():
+    for text in (UNIT_ONLY, UNIT_WITH_BOTH_CLASSES):
+        found = extract_distributions(text, ticker="TAEE11", published=date(2026, 10, 21))
+        assert len(found) == 1
+        assert abs(found[0].gross - 0.90) < 1e-9
+        assert found[0].share_class == "unit"
+        for ticker in ("PETR3", "PETR4"):
+            assert extract_distributions(text, ticker=ticker, published=date(2026, 10, 21)) == []
+
+
+ONLY_ON = """
+Aprovaram dividendos de R$ 0,50 por ação ordinária.
+Farão jus os detentores de ações em 30 de outubro de 2026.
+"""
+
+ONLY_PN = """
+Aprovaram dividendos de R$ 0,40 por ação preferencial.
+Farão jus os detentores de ações em 30 de outubro de 2026.
+"""
+
+
+def test_only_on_and_only_pn_stay_on_their_own_class():
+    on = extract_distributions(ONLY_ON, ticker="PETR3", published=date(2026, 10, 21))
+    assert len(on) == 1 and abs(on[0].gross - 0.50) < 1e-9
+    assert extract_distributions(ONLY_ON, ticker="PETR4", published=date(2026, 10, 21)) == []
+    assert extract_distributions(ONLY_ON, ticker="TAEE11", published=date(2026, 10, 21)) == []
+    pn = extract_distributions(ONLY_PN, ticker="PETR4", published=date(2026, 10, 21))
+    assert len(pn) == 1 and abs(pn[0].gross - 0.40) < 1e-9
+    assert extract_distributions(ONLY_PN, ticker="PETR3", published=date(2026, 10, 21)) == []
+    assert extract_distributions(ONLY_PN, ticker="TAEE11", published=date(2026, 10, 21)) == []
+
+
+THIRD_COMPANY = """
+Alfa S.A. (B3: ALFA), Beta S.A. (B3: BETA) e Gama S.A. (B3: GAMA) aprovaram dividendos.
+
+Valor por Ação
+Ordinária e Preferencial
+Dividendos
+
+ALFA S.A.
+
+10/11/2026
+
+11/11/2026
+
+16/12/2026
+
+R$ 0,11
+
+BETA S.A.
+
+10/11/2026
+
+11/11/2026
+
+15/12/2026
+
+R$ 0,22
+
+GAMA S.A.
+
+10/11/2026
+
+11/11/2026
+
+15/12/2026
+
+R$ 0,33
+"""
+
+
+def test_joint_table_third_company_keeps_its_own_value():
+    published = date(2026, 10, 27)
+    expected = {"ALFA3": 0.11, "BETA4": 0.22, "GAMA3": 0.33, "GAMA4": 0.33}
+    for ticker, gross in expected.items():
+        found = extract_distributions(THIRD_COMPANY, ticker=ticker, published=published)
+        assert len(found) == 1, ticker
+        assert abs(found[0].gross - gross) < 1e-9, ticker
+        assert found[0].data_com == date(2026, 11, 10)
+    alfa = extract_distributions(THIRD_COMPANY, ticker="ALFA4", published=published)
+    assert len(alfa) == 1 and abs(alfa[0].gross - 0.11) < 1e-9
+    assert extract_distributions(THIRD_COMPANY, ticker="ZZZZ3", published=published) == []
+
+
+PAYMENT_CREDIT = """
+O Conselho deliberou dividendos de R$ 0,16 (dezesseis centavos de real) por ação,
+ordinária e preferencial.
+O pagamento será feito mediante crédito em 16/12/2026.
+"""
+
+RECORD_AND_PAYMENT_CREDIT = """
+O pagamento será feito mediante crédito em 16/12/2026.
+A Diretoria deliberou, para crédito em 10/11/2026, dividendos de R$ 0,16
+(dezesseis centavos de real) por ação, ordinária e preferencial, inscritas
+nos registros da companhia na data do crédito.
+"""
+
+
+def test_payment_credit_date_is_not_the_record_date():
+    paid = extract_distributions(PAYMENT_CREDIT, ticker="GOAU4", published=date(2026, 10, 27))
+    assert len(paid) == 1
+    assert abs(paid[0].gross - 0.16) < 1e-9
+    assert paid[0].data_com is None
+    record = extract_distributions(
+        RECORD_AND_PAYMENT_CREDIT, ticker="GOAU4", published=date(2026, 10, 27)
+    )
+    assert len(record) == 1
+    assert record[0].data_com == date(2026, 11, 10)
+    assert record[0].data_com != date(2026, 12, 16)
+

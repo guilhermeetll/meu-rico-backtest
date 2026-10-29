@@ -5,6 +5,10 @@ O script do estudo usava pdftotext -layout e uma regex que exigia no máximo
 (11 casas e o ano quebrado "202 6") e em IGTI11 (tabela sem "R$" na célula).
 Aqui o texto é normalizado e a tabela também é lida. Se nada disso achar o
 valor, o alerta sai como "conferir valor".
+
+"R$ 0,34 (trinta e quatro centavos) por ação, ordinária e preferencial" vale
+para as duas espécies. Num aviso de duas companhias, cada linha fica com o
+próprio R$/ação; a linha de ADR não entra.
 """
 
 from __future__ import annotations
@@ -40,10 +44,19 @@ _DATE_LONG = re.compile(
 )
 _DATE_NUM = re.compile(r"(\d{1,2})[./](\d{1,2})[./](\d{4})")
 _NUM = r"(\d{1,3}(?:\.\d{3})*,\d{2,12}|\d+,\d{2,12})"
+# O extenso pode ficar entre o número e "por ação":
+# "R$ 0,34 (trinta e quatro centavos de real) por ação".
 _PER_SHARE = re.compile(
-    rf"R\$\s*{_NUM}\s*(?:brutos?\s+)?(?:por|/)\s*(?:cada\s+)?"
+    rf"R\$\s*{_NUM}(?:\s*\([^)]{{0,100}}\))?\s*(?:brutos?\s+)?(?:por|/)\s*(?:cada\s+)?"
     rf"(acao(?:es)?(?:\s+ordinarias?|\s+preferenciais?)?|unit(?:s)?|cota(?:s)?)",
     re.IGNORECASE,
+)
+_B3_ALIAS = re.compile(
+    r"((?:[A-ZÁÉÍÓÚÃÕÇÜ][\wÁÉÍÓÚÃÕÇÜáéíóúãõç.'’\-]*\s+){1,6}S\.A\.)\s*\(\s*B3\s*:\s*([A-Z0-9]{4})"
+)
+_JOINT_ROW = re.compile(
+    rf"(\d{{2}}/\d{{2}}/\d{{4}})\s{{1,40}}(\d{{2}}/\d{{2}}/\d{{4}})"
+    rf"\s{{1,40}}(\d{{2}}/\d{{2}}/\d{{4}})\s{{1,40}}R\$\s*{_NUM}"
 )
 _LINE_DATE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 _LINE_NUM = re.compile(r"^\d{1,3}(?:\.\d{3})*,\d{4,12}$|^\d+,\d{4,12}$")
@@ -207,11 +220,20 @@ def infer_kind(text: str) -> str:
 
 
 def _share_class(snippet: str) -> str:
-    if "unit" in snippet:
+    """Espécie do trecho. Unit vem antes de 'ordinária e preferencial'.
+
+    As duas espécies com o mesmo valor ficam em `any`. Se o trecho fala em
+    unit, o valor é de unit — não vale para ON nem PN.
+    """
+    if re.search(r"\bunits?\b", snippet):
         return "unit"
-    if "preferenc" in snippet or re.search(r"\bpn\b", snippet):
+    has_pn = "preferenc" in snippet or re.search(r"\bpn\b", snippet) is not None
+    has_on = "ordinar" in snippet or re.search(r"\bon\b", snippet) is not None
+    if has_on and has_pn:
+        return "any"
+    if has_pn:
         return "pn"
-    if "ordinar" in snippet or re.search(r"\bon\b", snippet):
+    if has_on:
         return "on"
     return "any"
 
@@ -268,8 +290,81 @@ def _ex_date_from_text(text: str, data_com: date | None) -> date | None:
     return min(ranked)[1]
 
 
+def _credit_record_date(flat: str) -> date | None:
+    """'Crédito em 10/11' com as ações inscritas é a data-base, não o pagamento.
+
+    A ata da Gerdau não diz 'data-com'. 'Crédito em' sozinho é a data em que
+    o dinheiro cai; sem 'inscritas' ou 'posição acionária' ao lado, não vale.
+    """
+    if "data do credito" not in flat:
+        return None
+    for match in re.finditer(r"credito em\s+(\d{1,2})/(\d{1,2})/(\d{4})", flat):
+        before = flat[max(0, match.start() - 80) : match.start()]
+        cut = before.rfind(". ")
+        if cut >= 0:
+            before = before[cut + 2 :]
+        after = flat[match.end() : match.end() + 220]
+        cut = after.find(". ")
+        if cut >= 0:
+            after = after[:cut]
+        near = before + flat[match.start() : match.end()] + after
+        if "inscritas" not in near and "posicao acionaria" not in near:
+            continue
+        parsed = _parse_date("num", match.groups())
+        if parsed:
+            return parsed
+    return None
+
+
+_DECLARED = re.compile(r"\b(?:declar\w*|aprov\w*|deliber\w*)\b")
+_HISTORICAL = re.compile(r"anteriormente|exercicio anterior|pagos em")
+
+
+def _amount_passage(flat: str, start: int, end: int) -> str:
+    """Trecho deste R$/ação, sem atravessar o valor ao lado nem a frase anterior."""
+    left = flat[max(0, start - 90) : start]
+    prev = left.rfind("r$")
+    if prev >= 0:
+        left = left[prev + 2 :]
+    dot = left.rfind(". ")
+    if dot >= 0:
+        left = left[dot + 2 :]
+    right = flat[end : end + 48]
+    nxt = right.find("r$")
+    if nxt >= 0:
+        right = right[:nxt]
+    dot = right.find(". ")
+    if dot >= 0:
+        right = right[:dot]
+    return left + flat[start:end] + right
+
+
+def _historical_amount(passage: str) -> bool:
+    if _HISTORICAL.search(passage):
+        return True
+    # "pagos R$ 1,20 (um real e vinte centavos) por ação em 2025"
+    return (
+        re.search(r"\bpagos\b", passage) is not None
+        and re.search(r"\bem\s+(?:19|20)\d{2}\b", passage) is not None
+    )
+
+
+def _declared_or_at_record(flat: str, start: int, end: int, data_com: date | None) -> bool:
+    """O valor tem de estar na declaração ou junto da data-com."""
+    wide = flat[max(0, start - 400) : end + 200]
+    if _DECLARED.search(wide):
+        return True
+    if any(key in wide for key in COM_KEYS):
+        return True
+    if data_com is None:
+        return False
+    numeric = f"{data_com.day}/{data_com.month}/{data_com.year}"
+    padded = data_com.strftime("%d/%m/%Y")
+    return numeric in wide or padded in wide
+
+
 def _prose_hits(flat: str, document_kind: str) -> list[Distribution]:
-    data_com = _first_keyword_date(flat, COM_KEYS)
+    data_com = _first_keyword_date(flat, COM_KEYS) or _credit_record_date(flat)
     data_ex = _ex_date_from_text(flat, data_com)
     raw: list[tuple[float, str, str]] = []
     for match in _PER_SHARE.finditer(flat):
@@ -278,6 +373,11 @@ def _prose_hits(flat: str, document_kind: str) -> list[Distribution]:
         except ValueError:
             continue
         if not _accept(value):
+            continue
+        passage = _amount_passage(flat, match.start(), match.end())
+        if _historical_amount(passage):
+            continue
+        if not _declared_or_at_record(flat, match.start(), match.end(), data_com):
             continue
         before = flat[max(0, match.start() - 64) : match.start()]
         # A espécie pode vir logo depois de "por ação", mas não pode atravessar
@@ -620,6 +720,191 @@ def combine_same_record_date(items: list[Distribution]) -> list[Distribution]:
     return combined
 
 
+def _ticker_issuer(ticker: str | None) -> str | None:
+    if not ticker:
+        return None
+    match = re.match(r"^([A-Z0-9]{4})(?:11|[3-8])$", ticker.upper())
+    return match.group(1) if match else None
+
+
+def _name_tokens(name: str) -> list[str]:
+    return [part for part in re.findall(r"[a-z0-9]+", fold(name)) if len(part) >= 4]
+
+
+def _b3_aliases(text: str) -> dict[str, str]:
+    """`Metalúrgica Gerdau S.A. (B3: GOAU)` → código da B3 para o nome."""
+    found: dict[str, str] = {}
+    for match in _B3_ALIAS.finditer(text):
+        found[match.group(2).upper()] = re.sub(r"\s+", " ", match.group(1)).strip()
+    return found
+
+
+def _joint_header(text: str) -> bool:
+    cut = fold(text).find("notice to shareholders")
+    sample = text if cut < 0 else text[:cut]
+    folded = fold(re.sub(r"\s+", " ", sample))
+    return "valor por acao" in folded and "ordinar" in folded and "preferenc" in folded
+
+
+def _is_company_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or len(stripped) > 80 or re.search(r"\d{2}/\d{2}/\d{4}", stripped):
+        return False
+    letters = [ch for ch in stripped if ch.isalpha()]
+    if len(letters) < 4 or sum(ch.isupper() for ch in letters) / len(letters) < 0.75:
+        return False
+    folded = fold(stripped)
+    if folded in {
+        "empresa",
+        "data",
+        "data de",
+        "data-base",
+        "data base",
+        "ex-direito",
+        "ex direito",
+        "pagamento",
+        "dividendos",
+        "dividendo",
+        "date",
+        "payment",
+    }:
+        return False
+    return not (folded.startswith("valor por") or folded.startswith("ordinaria") or folded.startswith("ex-"))
+
+
+def _company_lines_before(text: str, start: int) -> list[str]:
+    window = text[max(0, start - 500) : start]
+    cut = window.lower().rfind("r$")
+    if cut >= 0:
+        window = window[cut + 2 :]
+    collected: list[str] = []
+    for line in reversed(window.splitlines()):
+        raw = line.strip()
+        if not raw:
+            continue
+        piece = re.split(r"\d{2}/\d{2}/\d{4}", raw)[0].strip()
+        if not piece:
+            continue
+        if _is_company_line(piece):
+            collected.append(piece)
+            continue
+        if collected:
+            break
+    collected.reverse()
+    return collected[-4:]
+
+
+def _continuation_after(text: str, end: int) -> list[str]:
+    """Nome da empresa quebrado na linha de baixo da célula, no pdftotext -layout."""
+    extra: list[str] = []
+    for line in text[end : end + 180].splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        if re.search(r"\d{2}/\d{2}/\d{4}", raw) or "r$" in raw.lower():
+            break
+        if _is_company_line(raw):
+            extra.append(raw)
+            if len(extra) >= 2:
+                break
+            continue
+        break
+    return extra
+
+
+def _issuer_for_label(label: str, aliases: dict[str, str]) -> str | None:
+    folded = fold(label)
+    if re.search(r"\badr\b", folded):
+        return None
+    best: str | None = None
+    best_score = 0
+    for code, name in aliases.items():
+        needed = _name_tokens(name)
+        if not needed or not all(token in folded for token in needed):
+            continue
+        if len(needed) > best_score:
+            best = code
+            best_score = len(needed)
+    return best
+
+
+def _label_issuer(text: str, start: int, end: int, aliases: dict[str, str]) -> str | None:
+    lines = _company_lines_before(text, start)
+    code = _issuer_for_label(" ".join(lines), aliases)
+    if code:
+        return code
+    lines = lines + _continuation_after(text, end)
+    return _issuer_for_label(" ".join(lines), aliases)
+
+
+def _joint_table(
+    text: str,
+    ticker: str | None,
+    document_kind: str,
+) -> list[Distribution] | None:
+    """Tabela de duas companhias com uma coluna só, ordinária e preferencial.
+
+    O aviso conjunto da Gerdau traz Metalúrgica (GOAU) e Gerdau S.A. (GGBR) na
+    mesma grade, mais uma linha de ADR. Cada código fica com o próprio R$/ação.
+    None = o texto não é essa tabela.
+    """
+    aliases = _b3_aliases(text)
+    if not (_joint_header(text) and len(aliases) >= 2):
+        return None
+    kind = document_kind if document_kind != "indefinido" else "dividendo"
+    net_factor = (1.0 - JCP_WITHHOLDING) if kind == "jcp" else None
+    tagged: list[tuple[str, Distribution]] = []
+    for match in _JOINT_ROW.finditer(text):
+        record = _parse_date("num", tuple(match.group(1).split("/")))
+        ex_date = _parse_date("num", tuple(match.group(2).split("/")))
+        payment = _parse_date("num", tuple(match.group(3).split("/")))
+        if record is None or ex_date is None or payment is None:
+            continue
+        gap = ex_date - record
+        if not (timedelta(0) < gap <= timedelta(days=10)) or payment < ex_date:
+            continue
+        try:
+            gross = parse_br_number(match.group(4))
+        except ValueError:
+            continue
+        if not _accept(gross):
+            continue
+        code = _label_issuer(text, match.start(), match.end(), aliases)
+        if not code:
+            continue
+        tagged.append(
+            (
+                code,
+                Distribution(
+                    kind=kind,
+                    gross=gross,
+                    net=gross * net_factor if net_factor is not None else None,
+                    data_com=record,
+                    data_ex=ex_date,
+                    share_class="any",
+                ),
+            )
+        )
+    if not tagged:
+        return None
+    issuer = _ticker_issuer(ticker)
+    if ticker:
+        if ticker_class(ticker) == "unit":
+            return []
+        tagged = [item for item in tagged if item[0] == issuer]
+    order: list[str] = []
+    buckets: dict[str, list[Distribution]] = {}
+    for code, item in tagged:
+        if code not in buckets:
+            order.append(code)
+            buckets[code] = []
+        buckets[code].append(item)
+    chosen: list[Distribution] = []
+    for code in order:
+        chosen.extend(combine_same_record_date(buckets[code]))
+    return chosen
+
+
 def extract_distributions(
     text: str,
     *,
@@ -635,6 +920,9 @@ def extract_distributions(
     if installments is not None:
         chosen = _for_ticker(installments, ticker)
         return combine_same_record_date(chosen)
+    joint = _joint_table(text, ticker, document_kind)
+    if joint is not None:
+        return joint
     flat = flatten(text)
     prose = _prose_hits(flat, document_kind)
     chosen = _for_ticker(prose, ticker)
@@ -644,21 +932,26 @@ def extract_distributions(
     if row is None:
         return []
     corte, ex, values = row
-    wanted = ticker_class(ticker)
-    share_class = wanted if wanted in values else "any"
-    gross = values.get(wanted, values.get("unit", next(iter(values.values()))))
-    net = gross * (1.0 - JCP_WITHHOLDING) if document_kind == "jcp" else None
     kind = document_kind if document_kind != "indefinido" else "dividendo"
-    return [
-        Distribution(
+
+    def _row(share_class: str, gross: float) -> Distribution:
+        net = gross * (1.0 - JCP_WITHHOLDING) if kind == "jcp" else None
+        return Distribution(
             kind=kind,
             gross=gross,
             net=net,
             data_com=corte,
             data_ex=ex,
-            share_class=share_class if share_class in values else "unit",
+            share_class=share_class,
         )
-    ]
+
+    if not ticker:
+        return [_row(share_class, gross) for share_class, gross in values.items()]
+    wanted = ticker_class(ticker)
+    # A coluna de unit não serve para ON nem PN: o yield inflaria. Conferir valor.
+    if wanted not in values:
+        return []
+    return [_row(wanted, values[wanted])]
 
 
 def _for_ticker(items: list[Distribution], ticker: str | None) -> list[Distribution]:
@@ -671,7 +964,8 @@ def _for_ticker(items: list[Distribution], ticker: str | None) -> list[Distribut
     generic = [item for item in items if item.share_class == "any"]
     if generic:
         return generic
-    return items
+    # Sem a espécie deste papel, inclusive quando o texto só tem unit. Conferir valor.
+    return []
 
 
 def select_for_ticker(items: list[Distribution], ticker: str) -> Distribution | None:
