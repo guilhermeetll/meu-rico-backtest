@@ -16,12 +16,11 @@ from alertas_dividendo.strategy import (
     cumulative_result,
     dividend_received,
     exit_session,
+    entry_reminder_due,
     has_rights,
     index_return,
     jcp_net,
-    last_close_session,
     passes_liquidity,
-    yield_close_action,
     same_cash_event,
     trade_return,
     yield_ratio,
@@ -88,30 +87,37 @@ def test_liquidity_needs_60_sessions_at_or_above_one_million():
     assert short_avg is None and short_n == 40
 
 
-def test_night_buys_next_session_and_intraday_does_not_buy_the_same_close():
+def test_night_buys_next_open_and_intraday_buys_the_same_close():
     night = buy_plan(_at(2026, 10, 21, 21, 0), True, CAL)
     intraday = buy_plan(_at(2026, 10, 21, 11, 0), True, CAL)
     after_call = buy_plan(_at(2026, 10, 21, 17, 37), True, CAL)
     assert night.timing == "apos_fechamento"
     assert intraday.timing == "durante_pregao"
     assert after_call.timing == "apos_fechamento"
+    assert intraday.entry_type == "fechamento"
+    assert intraday.entry_reason == "antes_de_1630"
+    assert intraday.buy_date == _d(2026, 10, 21)
+    assert intraday.deadline == _at(2026, 10, 21, 16, 30)
+    assert night.entry_type == "abertura"
+    assert night.entry_reason == "entrega_1630"
     assert night.buy_date == _d(2026, 10, 22)
-    assert intraday.buy_date == _d(2026, 10, 22)
-    assert intraday.buy_date != _d(2026, 10, 21)
-    assert after_call.buy_date == _d(2026, 10, 22)
-    assert night.deadline == _at(2026, 10, 22, 16, 55)
-    assert intraday.deadline == night.deadline
-    # O yield do backtest é o fechamento de entrada, sem olhar a hora.
-    assert last_close_session(_d(2026, 10, 21), CAL) == night.buy_date
-    assert last_close_session(_d(2026, 10, 21), CAL) == intraday.buy_date
+    assert night.deadline == _at(2026, 10, 22, 10, 0)
+    assert after_call.buy_date == night.buy_date
+    assert after_call.deadline == night.deadline
+    # 9:00 ainda é antes das 16:30: fechamento do dia, não a abertura.
+    morning = buy_plan(_at(2026, 10, 21, 9, 0), True, CAL)
+    assert morning.entry_type == "fechamento"
+    assert morning.buy_date == _d(2026, 10, 21)
 
 
-def test_friday_night_and_friday_intraday_skip_the_weekend():
+def test_friday_night_skips_the_weekend_and_friday_afternoon_buys_friday():
     night = buy_plan(_at(2026, 10, 23, 18, 30), True, CAL)
     intraday = buy_plan(_at(2026, 10, 23, 15, 0), True, CAL)
+    assert intraday.entry_type == "fechamento"
+    assert intraday.buy_date == _d(2026, 10, 23)
+    assert night.entry_type == "abertura"
     assert night.buy_date == _d(2026, 10, 26)
-    assert intraday.buy_date == _d(2026, 10, 26)
-    assert night.deadline.hour == 16 and night.deadline.minute == 55
+    assert night.deadline == _at(2026, 10, 26, 10, 0)
 
 
 def test_exit_reminder_follows_the_call_including_ash_wednesday():
@@ -124,25 +130,40 @@ def test_exit_reminder_follows_the_call_including_ash_wednesday():
     assert CAL.near_close(_at(2026, 10, 22, 16, 0), regular) is True
 
 
-def test_notice_at_1655_and_1700_and_on_a_holiday_buys_the_next_session():
-    """16:55 ainda é pregão, 17:00 já é depois do call. Os dois compram o dia seguinte."""
+def test_notice_at_1630_and_on_a_holiday_or_weekend_buys_the_next_open():
+    """16:30 já é tarde para o fechamento do dia. Feriado e fim de semana abrem o pregão seguinte."""
+    at_cutoff = buy_plan(_at(2026, 10, 21, 16, 30), True, CAL)
     at_call = buy_plan(_at(2026, 10, 21, 16, 55), True, CAL)
     at_close = buy_plan(_at(2026, 10, 21, 17, 0), True, CAL)
+    assert at_cutoff.entry_type == at_call.entry_type == at_close.entry_type == "abertura"
+    assert at_cutoff.entry_reason == "entrega_1630"
     assert at_call.timing == "durante_pregao"
     assert at_close.timing == "apos_fechamento"
-    assert at_call.buy_date == _d(2026, 10, 22)
-    assert at_close.buy_date == _d(2026, 10, 22)
-    assert at_call.deadline == at_close.deadline == _at(2026, 10, 22, 16, 55)
+    assert at_cutoff.buy_date == at_call.buy_date == at_close.buy_date == _d(2026, 10, 22)
+    assert at_cutoff.deadline == _at(2026, 10, 22, 10, 0)
     holiday = buy_plan(_at(2026, 11, 2, 11, 0), True, CAL)
     assert holiday.timing == "dia_sem_pregao"
+    assert holiday.entry_reason == "dia_sem_pregao"
+    assert holiday.entry_type == "abertura"
     assert holiday.buy_date == _d(2026, 11, 3)
-    # Cinzas: 17:00 ainda é pregão (fecha 18:00). 18:00 compra o dia seguinte.
-    ash_open = buy_plan(_at(2026, 2, 18, 17, 0), True, CAL)
+    assert holiday.deadline == _at(2026, 11, 3, 10, 0)
+    weekend = buy_plan(_at(2026, 10, 24, 11, 0), True, CAL)
+    assert weekend.entry_reason == "dia_sem_pregao"
+    assert weekend.entry_type == "abertura"
+    assert weekend.buy_date == _d(2026, 10, 26)
+    assert weekend.deadline == _at(2026, 10, 26, 10, 0)
+    # Cinzas fecha às 18:00, mas 16:30 já manda para a abertura do dia seguinte.
+    ash_during = buy_plan(_at(2026, 2, 18, 17, 0), True, CAL)
     ash_close = buy_plan(_at(2026, 2, 18, 18, 0), True, CAL)
-    assert ash_open.timing == "durante_pregao"
+    ash_early = buy_plan(_at(2026, 2, 18, 15, 0), True, CAL)
+    assert ash_during.timing == "durante_pregao"
     assert ash_close.timing == "apos_fechamento"
-    assert ash_open.buy_date == ash_close.buy_date == _d(2026, 2, 19)
-    assert ash_open.deadline == _at(2026, 2, 19, 16, 55)
+    assert ash_during.entry_type == ash_close.entry_type == "abertura"
+    assert ash_during.buy_date == ash_close.buy_date == _d(2026, 2, 19)
+    assert ash_during.deadline == _at(2026, 2, 19, 10, 0)
+    assert ash_early.entry_type == "fechamento"
+    assert ash_early.buy_date == _d(2026, 2, 18)
+    assert ash_early.deadline == _at(2026, 2, 18, 16, 30)
 
 
 def test_record_date_on_christmas_eve_or_a_holiday_is_not_a_session():
@@ -204,14 +225,18 @@ def test_record_date_on_christmas_eve_or_a_holiday_is_not_a_session():
 def test_date_only_and_holiday_and_ash_wednesday_clock():
     date_only = buy_plan(_d(2026, 10, 21), False, CAL)
     assert date_only.timing == "sem_horario"
+    assert date_only.entry_reason == "sem_horario"
+    assert date_only.entry_type == "abertura"
     assert date_only.buy_date == _d(2026, 10, 22)
+    assert date_only.deadline == _at(2026, 10, 22, 10, 0)
     holiday = buy_plan(_at(2026, 11, 2, 11, 0), True, CAL)
     assert holiday.timing == "dia_sem_pregao"
     assert holiday.buy_date == _d(2026, 11, 3)
     # 13/02/2026 é sexta. 16 e 17 são Carnaval. O pregão seguinte é a Cinzas, 18/02.
     carnival_friday = buy_plan(_at(2026, 2, 13, 18, 0), True, CAL)
+    assert carnival_friday.entry_type == "abertura"
     assert carnival_friday.buy_date == _d(2026, 2, 18)
-    assert carnival_friday.deadline == _at(2026, 2, 18, 17, 55)
+    assert carnival_friday.deadline == _at(2026, 2, 18, 13, 0)
 
 
 def test_b3_2026_closures_and_exit_twenty_sessions_after_data_com():
@@ -434,24 +459,59 @@ def test_saud3_decision_matches_the_frozen_trade():
         calendar=CAL,
     )
     assert decision.action == "comprar"
+    assert decision.plan is not None
+    assert decision.plan.entry_type == "abertura"
     assert decision.plan.buy_date == _d(2026, 10, 22)
     assert decision.price_session == _d(2026, 10, 22)
     assert decision.exit_date == _d(2026, 12, 1)
     assert decision.yld == 0.342059542 / 15.42
 
 
-def test_entry_close_cannot_be_waited_for_before_the_buy():
-    """O fechamento de entrada sai no call, depois do prazo do alerta."""
-    buy = _d(2026, 10, 22)
-    deadline = _at(2026, 10, 22, 16, 55)
-    assert CAL.close_at(buy) == _at(2026, 10, 22, 17, 0)
-    assert yield_close_action(_at(2026, 10, 21, 15, 0), buy, deadline, False, CAL) == "substituir"
-    assert yield_close_action(_at(2026, 10, 22, 16, 0), buy, deadline, False, CAL) == "substituir"
-    assert yield_close_action(_at(2026, 10, 22, 17, 5), buy, deadline, True, CAL) == "usar"
-    # Um fechamento que imprime antes do prazo ainda pode chegar na hora seguinte.
-    published = _d(2026, 10, 21)
-    assert yield_close_action(_at(2026, 10, 21, 15, 0), published, deadline, False, CAL) == "esperar"
-    assert yield_close_action(_at(2026, 10, 22, 17, 0), published, deadline, False, CAL) == "substituir"
+def test_detection_cutoff_is_1629_for_the_close_and_1630_for_the_open():
+    """O corte da detecção é 16:30. 16:29 ainda compra o fechamento."""
+    delivered = _at(2026, 10, 21, 14, 0)
+    at_1629 = buy_plan(delivered, True, CAL, detected_at=_at(2026, 10, 21, 16, 29))
+    at_1630 = buy_plan(delivered, True, CAL, detected_at=_at(2026, 10, 21, 16, 30))
+    assert at_1629.entry_type == "fechamento"
+    assert at_1629.late_detection is False
+    assert at_1629.buy_date == _d(2026, 10, 21)
+    assert at_1629.deadline == _at(2026, 10, 21, 16, 30)
+    assert at_1630.entry_type == "abertura"
+    assert at_1630.entry_reason == "deteccao_tardia"
+    assert at_1630.late_detection is True
+    assert at_1630.buy_date == _d(2026, 10, 22)
+    assert at_1630.deadline == _at(2026, 10, 22, 10, 0)
+
+
+def test_late_detection_of_a_morning_notice_buys_the_next_open():
+    """Aviso antes das 16:30, visto só depois: abertura do pregão seguinte."""
+    delivered = _at(2026, 10, 21, 14, 0)
+    in_time = buy_plan(delivered, True, CAL, detected_at=_at(2026, 10, 21, 15, 0))
+    assert in_time.entry_type == "fechamento"
+    assert in_time.late_detection is False
+    assert in_time.buy_date == _d(2026, 10, 21)
+    late = buy_plan(delivered, True, CAL, detected_at=_at(2026, 10, 21, 16, 40))
+    assert late.entry_type == "abertura"
+    assert late.entry_reason == "deteccao_tardia"
+    assert late.late_detection is True
+    assert late.buy_date == _d(2026, 10, 22)
+    assert late.deadline == _at(2026, 10, 22, 10, 0)
+    exact = buy_plan(delivered, True, CAL, detected_at=_at(2026, 10, 21, 16, 30))
+    assert exact.late_detection is True
+    assert exact.entry_type == "abertura"
+
+
+def test_entry_reminder_goes_out_before_10():
+    day = _d(2026, 10, 22)
+    assert entry_reminder_due(_at(2026, 10, 22, 8, 0), day, "abertura") is True
+    assert entry_reminder_due(_at(2026, 10, 22, 9, 0), day, "abertura") is True
+    assert entry_reminder_due(_at(2026, 10, 22, 9, 59), day, "abertura") is True
+    assert entry_reminder_due(_at(2026, 10, 22, 10, 0), day, "abertura") is False
+    assert entry_reminder_due(_at(2026, 10, 22, 7, 59), day, "abertura") is False
+    assert entry_reminder_due(_at(2026, 10, 22, 9, 0), day, "fechamento") is False
+    assert entry_reminder_due(_at(2026, 10, 21, 9, 0), day, "abertura") is False
+    ash = _d(2026, 2, 18)
+    assert entry_reminder_due(_at(2026, 2, 18, 9, 0), ash, "abertura") is True
 
 
 def test_no_rights_when_buy_is_after_data_com():

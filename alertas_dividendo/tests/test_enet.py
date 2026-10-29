@@ -10,7 +10,7 @@ from alertas_dividendo.cvm_parse import parse_enet_dados
 from alertas_dividendo.engine import Report, _ingest
 from alertas_dividendo.sources import CaptchaRequired, enet_body, fetch_enet, month_spans
 from alertas_dividendo.store import Store
-from alertas_dividendo.strategy import buy_plan, last_close_session
+from alertas_dividendo.strategy import buy_plan
 
 CAL = Calendar()
 
@@ -125,18 +125,18 @@ def test_captcha_para_no_segundo_mes_e_nao_repete():
     assert "01/11/2026" in calls[1]
 
 
-def test_hora_de_entrega_nao_muda_o_fechamento_do_yield():
-    """A hora fica no rótulo. O yield usa o pregão seguinte, nos dois horários."""
+def test_hora_de_entrega_escolhe_fechamento_ou_abertura():
+    """17:37 abre o pregão seguinte. 11:02, visto na hora, fecha o mesmo dia."""
     night = parse_enet_dados(ROW)[0]
     day = parse_enet_dados(ROW_DIA)[0]
     night_plan = buy_plan(night.published_at, night.time_known, CAL)
     day_plan = buy_plan(day.published_at, day.time_known, CAL)
     assert night_plan.timing == "apos_fechamento"
     assert day_plan.timing == "durante_pregao"
+    assert night_plan.entry_type == "abertura"
     assert night_plan.buy_date == date(2026, 10, 22)
-    assert day_plan.buy_date == date(2026, 10, 22)
-    assert last_close_session(night.published_at.date(), CAL) == date(2026, 10, 22)
-    assert last_close_session(day.published_at.date(), CAL) == date(2026, 10, 22)
+    assert day_plan.entry_type == "fechamento"
+    assert day_plan.buy_date == date(2026, 10, 21)
 
 
 def test_captcha_avisa_uma_vez_e_nao_consulta_de_novo(tmp_path, monkeypatch):

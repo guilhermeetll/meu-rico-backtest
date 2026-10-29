@@ -39,9 +39,10 @@ CREATE TABLE IF NOT EXISTS issuers (
 CREATE TABLE IF NOT EXISTS quotes (
     ticker TEXT NOT NULL,
     session_date TEXT NOT NULL,
-    close REAL NOT NULL,
+    close REAL,
     volume REAL NOT NULL,
     source TEXT NOT NULL,
+    open_price REAL,
     PRIMARY KEY (ticker, session_date)
 );
 CREATE TABLE IF NOT EXISTS quote_files (
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS quote_files (
 CREATE TABLE IF NOT EXISTS index_quotes (
     session_date TEXT PRIMARY KEY,
     close REAL NOT NULL,
-    source TEXT NOT NULL
+    source TEXT NOT NULL,
+    open_price REAL
 );
 CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,6 +76,7 @@ CREATE TABLE IF NOT EXISTS signals (
     published_at TEXT,
     time_known INTEGER,
     timing TEXT,
+    entry_type TEXT,
     buy_date TEXT,
     buy_deadline TEXT,
     exit_date TEXT,
@@ -90,6 +93,7 @@ CREATE TABLE IF NOT EXISTS positions (
     signal_id INTEGER UNIQUE,
     ticker TEXT,
     status TEXT,
+    entry_type TEXT,
     entry_date TEXT,
     entry_price REAL,
     entry_source TEXT,
@@ -144,6 +148,16 @@ CREATE TABLE IF NOT EXISTS b3_checks (
 """
 
 
+def _normalize_quote(row: tuple) -> tuple:
+    """Aceita a tupla antiga de 5 campos. A abertura, se vier, é o sexto."""
+    if len(row) >= 6:
+        ticker, session, close, volume, source, open_price = row[:6]
+    else:
+        ticker, session, close, volume, source = row
+        open_price = None
+    return (ticker, session, close, volume, source, open_price)
+
+
 class Store:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -151,7 +165,46 @@ class Store:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._ensure_column("quotes", "open_price", "REAL")
+        self._ensure_column("signals", "entry_type", "TEXT")
+        self._ensure_column("positions", "entry_type", "TEXT")
+        self._ensure_column("index_quotes", "open_price", "REAL")
+        self._relax_quote_close()
         self.conn.commit()
+
+    def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        """CREATE TABLE IF NOT EXISTS não acrescenta coluna em base antiga."""
+        found = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+        if column not in found:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+    def _relax_quote_close(self) -> None:
+        """O fechamento pode ficar vazio quando a linha só guarda a abertura.
+
+        O CREATE antigo tinha NOT NULL. O SQLite não tira essa restrição com
+        ALTER COLUMN; a tabela é recriada.
+        """
+        columns = list(self.conn.execute("PRAGMA table_info(quotes)"))
+        close = next(row for row in columns if row[1] == "close")
+        if close[3] == 0:
+            return
+        self.conn.executescript(
+            """
+            CREATE TABLE quotes_relaxed (
+                ticker TEXT NOT NULL,
+                session_date TEXT NOT NULL,
+                close REAL,
+                volume REAL NOT NULL,
+                source TEXT NOT NULL,
+                open_price REAL,
+                PRIMARY KEY (ticker, session_date)
+            );
+            INSERT INTO quotes_relaxed (ticker, session_date, close, volume, source, open_price)
+            SELECT ticker, session_date, close, volume, source, open_price FROM quotes;
+            DROP TABLE quotes;
+            ALTER TABLE quotes_relaxed RENAME TO quotes;
+            """
+        )
 
     def close(self) -> None:
         self.conn.close()
@@ -314,26 +367,27 @@ class Store:
             (file_key, datetime.now().isoformat(timespec="seconds")),
         )
 
-    def insert_quotes_if_absent(self, rows: list[tuple[str, str, float, float, str]]) -> None:
+    def insert_quotes_if_absent(self, rows: list[tuple]) -> None:
         self.conn.executemany(
             """
-            INSERT OR IGNORE INTO quotes (ticker, session_date, close, volume, source)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO quotes (ticker, session_date, close, volume, source, open_price)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            rows,
+            [_normalize_quote(row) for row in rows],
         )
 
-    def upsert_quotes(self, rows: list[tuple[str, str, float, float, str]]) -> None:
+    def upsert_quotes(self, rows: list[tuple]) -> None:
         self.conn.executemany(
             """
-            INSERT INTO quotes (ticker, session_date, close, volume, source)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO quotes (ticker, session_date, close, volume, source, open_price)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(ticker, session_date) DO UPDATE SET
                 close=excluded.close,
                 volume=excluded.volume,
-                source=excluded.source
+                source=excluded.source,
+                open_price=COALESCE(excluded.open_price, quotes.open_price)
             """,
-            rows,
+            [_normalize_quote(row) for row in rows],
         )
 
     def tickers_of(self, issuer: str) -> list[str]:
@@ -386,22 +440,54 @@ class Store:
 
     def close_on(self, ticker: str, session: str) -> sqlite3.Row | None:
         return self.conn.execute(
-            "SELECT close, source FROM quotes WHERE ticker=? AND session_date=?",
+            """
+            SELECT close, source FROM quotes
+            WHERE ticker=? AND session_date=? AND close IS NOT NULL
+            """,
             (ticker, session),
         ).fetchone()
 
-    def upsert_index(self, session: str, close: float, source: str) -> None:
+    def set_close_if_absent(self, ticker: str, session: str, close: float, volume: float, source: str) -> None:
+        """Preenche o fechamento de uma linha que só tinha a abertura."""
         self.conn.execute(
             """
-            INSERT INTO index_quotes (session_date, close, source) VALUES (?, ?, ?)
-            ON CONFLICT(session_date) DO UPDATE SET close=excluded.close, source=excluded.source
+            UPDATE quotes SET close=?, volume=?, source=?
+            WHERE ticker=? AND session_date=? AND close IS NULL AND source LIKE 'Yahoo%'
             """,
-            (session, close, source),
+            (close, volume, source, ticker, session),
+        )
+
+    def quote_on(self, ticker: str, session: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT open_price, close, source FROM quotes WHERE ticker=? AND session_date=?",
+            (ticker, session),
+        ).fetchone()
+
+    def set_open_if_absent(self, ticker: str, session: str, open_price: float) -> None:
+        """Grava a abertura sem trocar fechamento, volume nem fonte."""
+        self.conn.execute(
+            """
+            UPDATE quotes SET open_price=?
+            WHERE ticker=? AND session_date=? AND open_price IS NULL
+            """,
+            (open_price, ticker, session),
+        )
+
+    def upsert_index(self, session: str, close: float, source: str, open_price: float | None = None) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO index_quotes (session_date, close, source, open_price) VALUES (?, ?, ?, ?)
+            ON CONFLICT(session_date) DO UPDATE SET
+                close=excluded.close,
+                source=excluded.source,
+                open_price=COALESCE(excluded.open_price, index_quotes.open_price)
+            """,
+            (session, close, source, open_price),
         )
 
     def index_on(self, session: str) -> sqlite3.Row | None:
         return self.conn.execute(
-            "SELECT close, source FROM index_quotes WHERE session_date=?",
+            "SELECT close, source, open_price FROM index_quotes WHERE session_date=?",
             (session,),
         ).fetchone()
 

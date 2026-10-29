@@ -1,8 +1,10 @@
-"""Regras congeladas do swing de dividendo. Não parametrizar por ambiente.
+"""Regras do swing de dividendo. Não parametrizar por ambiente.
 
-A compra é o fechamento do pregão seguinte à data de publicação na CVM, com
-ou sem hora de entrega. A hora fica em `timing` só para o log e a mensagem.
-O yield do backtest usa o mesmo fechamento de entrada (`last_close_session`).
+A hora de entrega no ENET (America/Sao_Paulo) escolhe a entrada. Antes das
+16:30 num pregão, vista a tempo, a compra é o fechamento desse dia. Às 16:30
+ou depois, em dia sem pregão, sem hora na fonte, ou com detecção tardia, a
+compra é a abertura do pregão seguinte. A saída continua o fechamento do 20º
+pregão depois da data-com.
 """
 
 from __future__ import annotations
@@ -21,6 +23,11 @@ SESSIONS_AFTER_COM = 20
 MAX_POSITIONS = 10
 SLOT_WEIGHT = 0.10
 JCP_WITHHOLDING = 0.15
+# 16:30 ainda é antes do call (16:55; na Cinzas, 17:55). Às 16:30 em ponto
+# o fechamento do mesmo dia já não cabe: a varredura é de hora em hora.
+SAME_DAY_CUTOFF = time(16, 30)
+ENTRY_REMINDER_FROM = time(8, 0)
+ENTRY_REMINDER_UNTIL = time(10, 0)
 
 
 @dataclass(frozen=True)
@@ -30,6 +37,11 @@ class BuyPlan:
     close_at: datetime
     # durante_pregao | apos_fechamento | antes_da_abertura | dia_sem_pregao | sem_horario
     timing: str
+    # fechamento (mesmo dia) | abertura (pregão seguinte)
+    entry_type: str
+    # antes_de_1630 | entrega_1630 | dia_sem_pregao | sem_horario | deteccao_tardia
+    entry_reason: str
+    late_detection: bool = False
 
     @property
     def during_session(self) -> bool:
@@ -95,13 +107,23 @@ def buy_plan(
     published_at: datetime | date,
     time_known: bool,
     calendar: Calendar,
+    detected_at: datetime | None = None,
 ) -> BuyPlan:
-    """Fechamento do primeiro pregão depois da data de publicação.
+    """Entrada pelo horário de entrega no ENET.
 
-    16:55 ainda é durante o pregão, 17:00 já é depois do call, feriado é dia sem
-    pregão e a Quarta de Cinzas fecha às 18:00. Em todos esses casos a compra
-    é o pregão seguinte. `timing` fica só no log e na mensagem. Compra no
-    mesmo dia não foi testada.
+    Sem `detected_at`, a detecção é o próprio instante da publicação (o aviso
+    foi visto na hora). O motor passa o relógio da varredura.
+
+    - Antes das 16:30 num pregão, vista nesse mesmo dia antes das 16:30:
+      fechamento desse dia. O prazo do alerta é 16:30, não o call.
+    - Entrega às 16:30 ou depois: abertura do pregão seguinte.
+    - Dia sem pregão, ou fonte sem hora: abertura do pregão seguinte. Sem
+      hora não dá para provar que chegou antes das 16:30.
+    - Entrega antes das 16:30, mas a varredura só vê às 16:30 ou depois
+      (ou noutro dia): abertura do pregão seguinte, com `late_detection`.
+
+    O prazo da abertura é o início do leilão (10:00; 13:00 na Cinzas).
+    Na hora exata o prazo já passou.
     """
     if isinstance(published_at, datetime):
         local = published_at.astimezone(TZ) if published_at.tzinfo else published_at.replace(tzinfo=TZ)
@@ -111,47 +133,57 @@ def buy_plan(
         day = published_at
         clock = None
         time_known = False
+        local = None
     timing = _timing(day, clock, time_known, calendar)
-    buy_date = calendar.next_session(day)
-    return BuyPlan(
-        buy_date=buy_date,
-        deadline=calendar.deadline(buy_date),
-        close_at=calendar.close_at(buy_date),
-        timing=timing,
-    )
+
+    def opening(reason: str, *, late: bool) -> BuyPlan:
+        buy_date = calendar.next_session(day)
+        return BuyPlan(
+            buy_date=buy_date,
+            deadline=calendar.open_at(buy_date),
+            close_at=calendar.close_at(buy_date),
+            timing=timing,
+            entry_type="abertura",
+            entry_reason=reason,
+            late_detection=late,
+        )
+
+    if not time_known or clock is None:
+        return opening("sem_horario", late=False)
+    if not calendar.is_session(day):
+        return opening("dia_sem_pregao", late=False)
+    if clock >= SAME_DAY_CUTOFF:
+        return opening("entrega_1630", late=False)
+
+    seen = aware(detected_at) if detected_at is not None else local
+    assert seen is not None
+    seen_clock = seen.timetz().replace(tzinfo=None)
+    if seen.date() == day and seen_clock < SAME_DAY_CUTOFF:
+        return BuyPlan(
+            buy_date=day,
+            deadline=datetime.combine(day, SAME_DAY_CUTOFF, tzinfo=TZ),
+            close_at=calendar.close_at(day),
+            timing=timing,
+            entry_type="fechamento",
+            entry_reason="antes_de_1630",
+            late_detection=False,
+        )
+    return opening("deteccao_tardia", late=True)
 
 
-def last_close_session(published_day: date, calendar: Calendar) -> date:
-    """Fechamento que o backtest usa no yield: o preço de entrada.
+def entry_reminder_due(now: datetime, entry_date: date, entry_type: str) -> bool:
+    """Lembrete da abertura: no dia da entrada, das 8:00 inclusive até as 10:00.
 
-    Rodada 9 congela "yield no preço de entrada". O script da rodada 11
-    (`dividendo_atraso_cvm.py`) faz `s0 = idx.searchsorted(data, side='right')`
-    e `y = valor / C[s0]`. `side='right'` é o primeiro pregão estritamente
-    depois da data — o mesmo pregão da compra. A hora da entrega não entra.
+    Na Cinzas a abertura é às 13:00; o lembrete continua antes das 10:00.
+    Fechamento do mesmo dia não tem lembrete de manhã.
     """
-    return calendar.next_session(published_day)
-
-
-def yield_close_action(
-    now: datetime,
-    reference: date,
-    deadline: datetime,
-    quote_ready: bool,
-    calendar: Calendar,
-) -> str:
-    """`usar`, `esperar` ou `substituir`.
-
-    `usar`: o fechamento de referência já está na base.
-    `esperar`: ele ainda não está, mas o pregão fecha antes do prazo do
-    alerta, então a próxima hora ainda dá tempo de avisar. Não grava sinal.
-    `substituir`: esse fechamento só sai no call da compra, ou o prazo já
-    chegou. O alerta usa o último fechamento disponível e diz isso.
-    """
-    if quote_ready:
-        return "usar"
-    if calendar.close_at(reference) < deadline and aware(now) < deadline:
-        return "esperar"
-    return "substituir"
+    if entry_type != "abertura":
+        return False
+    local = aware(now)
+    if local.date() != entry_date:
+        return False
+    clock = local.timetz().replace(tzinfo=None)
+    return ENTRY_REMINDER_FROM <= clock < ENTRY_REMINDER_UNTIL
 
 
 def exit_session(data_com: date, calendar: Calendar) -> date:

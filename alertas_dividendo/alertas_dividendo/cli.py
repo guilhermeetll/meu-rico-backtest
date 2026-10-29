@@ -36,6 +36,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     reminder = sub.add_parser("exit-reminder", help="Lembrete de venda perto do fechamento, no dia da saída.")
     common(reminder, telegram=True)
+    entry = sub.add_parser(
+        "entry-reminder",
+        help="Lembrete de compra na abertura, antes das 10h do dia da entrada.",
+    )
+    common(entry, telegram=True)
     chat = sub.add_parser("chat-id", help="Lê o getUpdates e imprime o chat id. Fale com o bot antes.")
     status = sub.add_parser("status", help="Mostra posições abertas e os últimos eventos.")
     status.add_argument("--data-dir", default=None)

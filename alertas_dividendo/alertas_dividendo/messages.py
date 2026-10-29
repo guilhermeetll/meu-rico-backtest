@@ -78,25 +78,46 @@ def _yield_line(
     last_close_source: str,
     reference_close_date: date,
     reference_close_used: bool,
+    entry_type: str,
+    buy_date: date,
 ) -> str:
-    """O preço de referência é o fechamento de entrada do backtest.
+    """A tela de yield é o último fechamento já publicado.
 
-    Quando ele ainda não saiu, o número usa o último fechamento disponível
-    e o texto deixa isso explícito. A hora da entrega não escolhe o pregão.
+    O preço de entrada (fechamento do dia ou abertura do pregão seguinte)
+    ainda não saiu quando o alerta tem de ir. `reference_close_used` fica na
+    assinatura para os testes antigos; a tela não espera esse preço.
     """
-    if reference_close_used:
-        return (
-            f"Yield: {pct(yld)} sobre o fechamento de entrada de {brl(last_close, 2)} "
-            f"em {day(last_close_date)} ({last_close_source}). "
-            "É o preço do backtest: primeiro pregão após a data de publicação."
-        )
+    del reference_close_used
+    entrada = (
+        f"o fechamento de {day(buy_date)}"
+        if entry_type == "fechamento"
+        else f"a abertura de {day(buy_date)}"
+    )
+    tela = day(last_close_date)
+    if reference_close_date != last_close_date:
+        tela = f"{day(last_close_date)} (sessão da tela {day(reference_close_date)})"
     return (
         f"Yield: {pct(yld)} sobre o último fechamento disponível de {brl(last_close, 2)} "
-        f"em {day(last_close_date)} ({last_close_source}). "
-        f"O backtest usa o fechamento de {day(reference_close_date)} "
-        "(primeiro pregão após a data de publicação). Esse fechamento ainda não saiu; "
-        "esperar por ele só permitiria avisar depois da compra."
+        f"em {tela} ({last_close_source}). "
+        f"Esse número é a tela de yield, porque {entrada} ainda não saiu."
     )
+
+
+def _entrada(entry_type: str, entry_reason: str, buy_date: date) -> str:
+    if entry_type == "fechamento":
+        return (
+            f"Compra no fechamento de hoje, {day(buy_date)}. "
+            "O aviso chegou antes das 16:30 e a varredura viu a tempo de entrar no call de fechamento."
+        )
+    why = {
+        "entrega_1630": "O aviso foi entregue às 16:30 ou depois.",
+        "dia_sem_pregao": "O aviso saiu num dia sem pregão.",
+        "sem_horario": "A fonte não traz a hora da entrega.",
+        "deteccao_tardia": (
+            "O aviso chegou antes das 16:30, mas a varredura só o viu depois desse horário."
+        ),
+    }.get(entry_reason, "A compra no fechamento do mesmo dia não cabe.")
+    return f"Compra na abertura de {day(buy_date)}. {why}"
 
 
 def _execucao(session: date) -> str:
@@ -104,6 +125,16 @@ def _execucao(session: date) -> str:
         f"Execução: ordem limitada perto do fechamento de {day(session)} "
         "(call 16:55–17:00, horário de Brasília; na Quarta de Cinzas o call é 17:55–18:00), "
         "em corretora de taxa zero. Comprar um pregão mais tarde corta cerca de metade do ganho."
+    )
+
+
+def _execucao_entrada(session: date, entry_type: str) -> str:
+    if entry_type == "fechamento":
+        return _execucao(session)
+    return (
+        f"Execução: leilão de abertura de {day(session)} "
+        "(até 10:00, horário de Brasília; na Quarta de Cinzas a abertura é às 13:00), "
+        "em corretora de taxa zero."
     )
 
 
@@ -135,6 +166,8 @@ def buy_message(
     entry_price: float | None,
     entry_source: str | None,
     simulacao: bool,
+    entry_type: str = "abertura",
+    entry_reason: str = "entrega_1630",
 ) -> str:
     title = "COMPRA ATRASADA — swing de dividendo" if late else "COMPRA — swing de dividendo"
     lines = [title]
@@ -146,11 +179,11 @@ def buy_message(
         )
     when = moment(published_at) if time_known else published_at.astimezone(TZ).strftime("%d/%m/%Y") + " (sem hora na fonte)"
     timing_label = {
-        "durante_pregao": "durante o pregão — a compra é no pregão seguinte",
+        "durante_pregao": "durante o pregão",
         "apos_fechamento": "depois do fechamento",
-        "antes_da_abertura": "antes da abertura — a regra por data compra no pregão seguinte",
+        "antes_da_abertura": "antes da abertura",
         "dia_sem_pregao": "dia sem pregão",
-        "sem_horario": "fonte sem horário (tratado como fim do dia)",
+        "sem_horario": "fonte sem horário",
     }.get(timing, timing)
     lines.extend(
         [
@@ -164,12 +197,14 @@ def buy_message(
                 last_close_source,
                 reference_close_date,
                 reference_close_used,
+                entry_type,
+                buy_date,
             ),
             f"Aprovação / data de referência: {day(approval) if approval else 'não informada'}",
             f"Publicação na CVM: {when} — {timing_label}",
             f"Data-com: {day(data_com) if data_com else 'não extraída — conferir no PDF'}",
             f"Data ex: {day(data_ex) if data_ex else 'não extraída — conferir no PDF'}",
-            f"Limite para comprar: fechamento de {day(buy_date)}",
+            _entrada(entry_type, entry_reason, buy_date),
             (
                 f"Saída prevista: fechamento de {day(exit_date)} "
                 "(20º pregão da B3 depois da data-com)"
@@ -192,10 +227,22 @@ def buy_message(
             f"Vaga: {slot_number}/{MAX_POSITIONS} (peso {pct(SLOT_WEIGHT).lstrip('+')} do capital)",
             f"Protocolo CVM: {protocol}",
             f"Documento: {url}",
-            _execucao(buy_date),
+            _execucao_entrada(buy_date, entry_type),
         ]
     )
     return with_disclaimer("\n".join(lines), simulacao)
+
+
+def entry_reminder_message(*, ticker: str, buy_date: date, simulacao: bool) -> str:
+    body = "\n".join(
+        [
+            f"LEMBRETE DE ENTRADA — {ticker}",
+            f"Compra na abertura de hoje, {day(buy_date)}, antes das 10:00 (horário de Brasília).",
+            "Na Quarta de Cinzas a abertura é às 13:00; o lembrete sai mesmo assim antes das 10:00.",
+            "A ordem da regra entra no leilão de abertura.",
+        ]
+    )
+    return with_disclaimer(body, simulacao)
 
 
 def conferir_message(
