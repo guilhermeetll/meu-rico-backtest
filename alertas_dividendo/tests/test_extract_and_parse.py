@@ -273,6 +273,76 @@ def test_cotahist_roundtrip():
     assert bars[0].session_date == date(2026, 10, 21)
 
 
+def test_yahoo_chart_encodes_bvsp_and_reads_open_and_close(monkeypatch, tmp_path):
+    """O ^ do Ibovespa passa por url_quote. Um local chamado quote derruba o GET."""
+    import json
+
+    from alertas_dividendo.calendar import TZ
+    from alertas_dividendo.quotes import _yahoo, ensure_index, yahoo_session
+    from alertas_dividendo.store import Store
+
+    day_close = int(datetime(2026, 10, 21, 12, 0, tzinfo=TZ).timestamp())
+    day_open_missing = int(datetime(2026, 10, 22, 12, 0, tzinfo=TZ).timestamp())
+    day_without_close = int(datetime(2026, 10, 23, 12, 0, tzinfo=TZ).timestamp())
+    payload = {
+        "chart": {
+            "result": [
+                {
+                    "timestamp": [day_close, day_open_missing, day_without_close],
+                    "indicators": {
+                        "quote": [
+                            {
+                                "open": [1000.5, None, 1.0],
+                                "close": [1100.25, 1200.0, None],
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+    seen: list[str] = []
+
+    def fake_get(url, timeout=40, headers=None):
+        seen.append(url)
+        return json.dumps(payload).encode()
+
+    monkeypatch.setattr("alertas_dividendo.quotes.get", fake_get)
+    rows = _yahoo("^BVSP", date(2026, 10, 21), date(2026, 10, 22))
+    assert seen
+    assert "%5EBVSP" in seen[0]
+    assert "query1.finance.yahoo.com" in seen[0]
+    assert rows == [
+        (date(2026, 10, 21), 1100.25, 1000.5),
+        (date(2026, 10, 22), 1200.0, None),
+    ]
+    store = Store(tmp_path / "alertas.sqlite")
+    try:
+        ensure_index(store, date(2026, 10, 21), date(2026, 10, 22))
+        first = store.index_on("2026-10-21")
+        second = store.index_on("2026-10-22")
+        assert first["close"] == 1100.25
+        assert first["open_price"] == 1000.5
+        assert second["close"] == 1200.0
+        assert second["open_price"] is None
+        assert store.index_on("2026-10-23") is None
+    finally:
+        store.close()
+    close, opened = yahoo_session("PETR4", date(2026, 10, 21))
+    assert (close, opened) == (1100.25, 1000.5)
+    assert any("PETR4.SA" in url for url in seen)
+
+
+def test_yahoo_http_error_returns_no_bars(monkeypatch):
+    from alertas_dividendo.quotes import _yahoo
+
+    def fake_get(url, timeout=40, headers=None):
+        raise RuntimeError("yahoo fora")
+
+    monkeypatch.setattr("alertas_dividendo.quotes.get", fake_get)
+    assert _yahoo("^BVSP", date(2026, 10, 21), date(2026, 10, 21)) == []
+
+
 def test_messages_carry_simulacao_and_jcp_net():
     from alertas_dividendo.calendar import TZ
 
