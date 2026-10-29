@@ -220,13 +220,17 @@ def infer_kind(text: str) -> str:
 
 
 def _share_class(snippet: str) -> str:
-    """Espécie do trecho. 'Ordinária e preferencial' é o mesmo valor nas duas."""
+    """Espécie do trecho. Unit vem antes de 'ordinária e preferencial'.
+
+    As duas espécies com o mesmo valor ficam em `any`. Se o trecho fala em
+    unit, o valor é de unit — não vale para ON nem PN.
+    """
+    if re.search(r"\bunits?\b", snippet):
+        return "unit"
     has_pn = "preferenc" in snippet or re.search(r"\bpn\b", snippet) is not None
     has_on = "ordinar" in snippet or re.search(r"\bon\b", snippet) is not None
     if has_on and has_pn:
         return "any"
-    if "unit" in snippet:
-        return "unit"
     if has_pn:
         return "pn"
     if has_on:
@@ -287,17 +291,76 @@ def _ex_date_from_text(text: str, data_com: date | None) -> date | None:
 
 
 def _credit_record_date(flat: str) -> date | None:
-    """'Crédito em 10/11 e inscritas na data do crédito' é a data-base, não o pagamento.
+    """'Crédito em 10/11' com as ações inscritas é a data-base, não o pagamento.
 
-    A ata da Gerdau não diz 'data-com': o crédito é a posição acionária e o
-    pagamento vem meses depois ('a partir de').
+    A ata da Gerdau não diz 'data-com'. 'Crédito em' sozinho é a data em que
+    o dinheiro cai; sem 'inscritas' ou 'posição acionária' ao lado, não vale.
     """
     if "data do credito" not in flat:
         return None
-    match = re.search(r"credito em\s+(\d{1,2})/(\d{1,2})/(\d{4})", flat)
-    if not match:
-        return None
-    return _parse_date("num", match.groups())
+    for match in re.finditer(r"credito em\s+(\d{1,2})/(\d{1,2})/(\d{4})", flat):
+        before = flat[max(0, match.start() - 80) : match.start()]
+        cut = before.rfind(". ")
+        if cut >= 0:
+            before = before[cut + 2 :]
+        after = flat[match.end() : match.end() + 220]
+        cut = after.find(". ")
+        if cut >= 0:
+            after = after[:cut]
+        near = before + flat[match.start() : match.end()] + after
+        if "inscritas" not in near and "posicao acionaria" not in near:
+            continue
+        parsed = _parse_date("num", match.groups())
+        if parsed:
+            return parsed
+    return None
+
+
+_DECLARED = re.compile(r"\b(?:declar\w*|aprov\w*|deliber\w*)\b")
+_HISTORICAL = re.compile(r"anteriormente|exercicio anterior|pagos em")
+
+
+def _amount_passage(flat: str, start: int, end: int) -> str:
+    """Trecho deste R$/ação, sem atravessar o valor ao lado nem a frase anterior."""
+    left = flat[max(0, start - 90) : start]
+    prev = left.rfind("r$")
+    if prev >= 0:
+        left = left[prev + 2 :]
+    dot = left.rfind(". ")
+    if dot >= 0:
+        left = left[dot + 2 :]
+    right = flat[end : end + 48]
+    nxt = right.find("r$")
+    if nxt >= 0:
+        right = right[:nxt]
+    dot = right.find(". ")
+    if dot >= 0:
+        right = right[:dot]
+    return left + flat[start:end] + right
+
+
+def _historical_amount(passage: str) -> bool:
+    if _HISTORICAL.search(passage):
+        return True
+    # "pagos R$ 1,20 (um real e vinte centavos) por ação em 2025"
+    return (
+        re.search(r"\bpagos\b", passage) is not None
+        and re.search(r"\bem\s+(?:19|20)\d{2}\b", passage) is not None
+    )
+
+
+def _declared_or_at_record(flat: str, start: int, end: int, data_com: date | None) -> bool:
+    """O valor tem de estar na declaração ou junto da data-com."""
+    wide = flat[max(0, start - 400) : end + 200]
+    if _DECLARED.search(wide):
+        return True
+    if any(key in wide for key in COM_KEYS):
+        return True
+    if data_com is None:
+        return False
+    numeric = f"{data_com.day}/{data_com.month}/{data_com.year}"
+    padded = data_com.strftime("%d/%m/%Y")
+    return numeric in wide or padded in wide
 
 
 def _prose_hits(flat: str, document_kind: str) -> list[Distribution]:
@@ -310,6 +373,11 @@ def _prose_hits(flat: str, document_kind: str) -> list[Distribution]:
         except ValueError:
             continue
         if not _accept(value):
+            continue
+        passage = _amount_passage(flat, match.start(), match.end())
+        if _historical_amount(passage):
+            continue
+        if not _declared_or_at_record(flat, match.start(), match.end(), data_com):
             continue
         before = flat[max(0, match.start() - 64) : match.start()]
         # A espécie pode vir logo depois de "por ação", mas não pode atravessar
@@ -864,21 +932,26 @@ def extract_distributions(
     if row is None:
         return []
     corte, ex, values = row
-    wanted = ticker_class(ticker)
-    share_class = wanted if wanted in values else "any"
-    gross = values.get(wanted, values.get("unit", next(iter(values.values()))))
-    net = gross * (1.0 - JCP_WITHHOLDING) if document_kind == "jcp" else None
     kind = document_kind if document_kind != "indefinido" else "dividendo"
-    return [
-        Distribution(
+
+    def _row(share_class: str, gross: float) -> Distribution:
+        net = gross * (1.0 - JCP_WITHHOLDING) if kind == "jcp" else None
+        return Distribution(
             kind=kind,
             gross=gross,
             net=net,
             data_com=corte,
             data_ex=ex,
-            share_class=share_class if share_class in values else "unit",
+            share_class=share_class,
         )
-    ]
+
+    if not ticker:
+        return [_row(share_class, gross) for share_class, gross in values.items()]
+    wanted = ticker_class(ticker)
+    # A coluna de unit não serve para ON nem PN: o yield inflaria. Conferir valor.
+    if wanted not in values:
+        return []
+    return [_row(wanted, values[wanted])]
 
 
 def _for_ticker(items: list[Distribution], ticker: str | None) -> list[Distribution]:
@@ -891,7 +964,8 @@ def _for_ticker(items: list[Distribution], ticker: str | None) -> list[Distribut
     generic = [item for item in items if item.share_class == "any"]
     if generic:
         return generic
-    return items
+    # Sem a espécie deste papel, inclusive quando o texto só tem unit. Conferir valor.
+    return []
 
 
 def select_for_ticker(items: list[Distribution], ticker: str) -> Distribution | None:
