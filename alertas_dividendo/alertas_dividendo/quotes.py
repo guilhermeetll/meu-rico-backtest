@@ -10,7 +10,7 @@ import io
 import logging
 import zipfile
 from datetime import date, datetime, timedelta
-from urllib.parse import quote
+from urllib.parse import quote as url_quote
 
 from alertas_dividendo.calendar import TZ, Calendar
 from alertas_dividendo.cotahist import parse_cotahist
@@ -100,7 +100,9 @@ def ensure_cotahist(store: Store, calendar: Calendar, start: date, end: date) ->
 def _yahoo(symbol: str, start: date, end: date) -> list[tuple[date, float, float | None]]:
     period1 = int(datetime.combine(start - timedelta(days=5), datetime.min.time(), tzinfo=TZ).timestamp())
     period2 = int(datetime.combine(end + timedelta(days=2), datetime.min.time(), tzinfo=TZ).timestamp())
-    url = YAHOO_URL.format(symbol=quote(symbol, safe=""), start=period1, end=period2)
+    # `url_quote`, não `quote`: um local com esse nome torna o import local e
+    # a montagem da URL (^BVSP) estoura UnboundLocalError antes do GET.
+    url = YAHOO_URL.format(symbol=url_quote(symbol, safe=""), start=period1, end=period2)
     import json
 
     try:
@@ -112,10 +114,10 @@ def _yahoo(symbol: str, start: date, end: date) -> list[tuple[date, float, float
     if not result:
         return []
     block = result[0]
-    quote = ((block.get("indicators") or {}).get("quote") or [{}])[0]
+    prices = ((block.get("indicators") or {}).get("quote") or [{}])[0]
     stamps = block.get("timestamp") or []
-    closes = quote.get("close") or []
-    opens = quote.get("open") or []
+    closes = prices.get("close") or []
+    opens = prices.get("open") or []
     out: list[tuple[date, float, float | None]] = []
     for index, stamp in enumerate(stamps):
         close = closes[index] if index < len(closes) else None
