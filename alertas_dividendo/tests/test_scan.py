@@ -1504,3 +1504,169 @@ def test_one_ticker_failure_does_not_abort_the_scan(tmp_path, monkeypatch):
         ).fetchone()["n"] == 0
     finally:
         store.close()
+
+
+def test_rewritten_data_com_key_still_blocks_the_undated_reread(tmp_path, monkeypatch):
+    """COMPRA sem data-com, outro documento grava a data no mesmo sinal, o aviso original volta.
+
+    A chave gravada passa a levar a data-com e o protocolo novo. A decisão é
+    forçada a comprar, para a trava achar a posição pelo sinal gravado e não
+    por essa chave.
+    """
+    from alertas_dividendo.decide import Decision
+
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
+    store.replace_issuers(
+        [
+            ("95111", "UGPA", "Ultrapar"),
+            ("95117", "VTRU", "Votorantim"),
+        ]
+    )
+    _notice(
+        store,
+        protocol="1587932",
+        cvm="95111",
+        company="Ultrapar",
+        ticker="UGPA3",
+        text="Aprovaram dividendos de R$ 1,00 por ação.",
+        published=datetime(2026, 11, 11, 18, 0, tzinfo=TZ),
+        reference="2026-11-11",
+    )
+    store.commit()
+    try:
+        at_1959 = datetime(2026, 11, 11, 19, 59, tzinfo=TZ)
+        _scan(_cfg(tmp_path, at_1959, dry_run=False), store, CAL, Report(now=at_1959, dry_run=False))
+        assert len(sent) == 1
+        assert sent[0].startswith("SIMULAÇÃO")
+        assert "COMPRA —" in sent[0] and "UGPA3" in sent[0]
+
+        _notice(
+            store,
+            protocol="1587941",
+            cvm="95111",
+            company="Ultrapar",
+            ticker="UGPA3",
+            text=(
+                "Aprovaram dividendos de R$ 1,00 por ação. "
+                "Farão jus os detentores de ações em 23 de novembro de 2026."
+            ),
+            published=datetime(2026, 11, 11, 19, 50, tzinfo=TZ),
+            reference="2026-11-11",
+        )
+        store.commit()
+        at_2000 = datetime(2026, 11, 11, 20, 0, tzinfo=TZ)
+        _scan(_cfg(tmp_path, at_2000, dry_run=False), store, CAL, Report(now=at_2000, dry_run=False))
+        signal = store.conn.execute(
+            "SELECT id, status, data_com, dedupe_key FROM signals WHERE ticker='UGPA3'"
+        ).fetchone()
+        assert signal["status"] == "aguardando_compra"
+        assert signal["data_com"] == "2026-11-23"
+        assert signal["dedupe_key"] == "UGPA3|dividendo|1.0000|2026-11-11|1587932"
+        store.conn.execute(
+            "UPDATE signals SET dedupe_key=?, late=1 WHERE id=?",
+            ("UGPA3|dividendo|1.0000|2026-11-23|1587941", signal["id"]),
+        )
+        store.commit()
+        frozen = _as_dict(store.conn.execute("SELECT * FROM signals WHERE id=?", (signal["id"],)).fetchone())
+        frozen_position = _as_dict(
+            store.conn.execute("SELECT * FROM positions WHERE ticker='UGPA3'").fetchone()
+        )
+
+        import alertas_dividendo.engine as engine
+
+        real_decide = engine.decide
+
+        def force_undated_buy(**kwargs):
+            choice = real_decide(**kwargs)
+            if kwargs.get("ticker") == "UGPA3" and kwargs.get("data_com") is None:
+                return Decision(
+                    "comprar",
+                    "ok",
+                    yld=choice.yld if choice.yld is not None else 0.1,
+                    plan=choice.plan,
+                    exit_date=choice.exit_date,
+                    price_session=choice.price_session,
+                )
+            return choice
+
+        monkeypatch.setattr(engine, "decide", force_undated_buy)
+        _notice(
+            store,
+            protocol="1588017",
+            cvm="95117",
+            company="Votorantim",
+            ticker="VTRU3",
+            text=(
+                "Aprovaram dividendos de R$ 0,50 por ação. "
+                "Farão jus os detentores de ações em 30 de novembro de 2026."
+            ),
+            published=datetime(2026, 11, 11, 20, 30, tzinfo=TZ),
+            reference="2026-11-11",
+        )
+        store.commit()
+        at_2100 = datetime(2026, 11, 11, 21, 0, tzinfo=TZ)
+        later = Report(now=at_2100, dry_run=False)
+        _scan(_cfg(tmp_path, at_2100, dry_run=False), store, CAL, later)
+        assert later.errors == []
+        kept = _as_dict(store.conn.execute("SELECT * FROM signals WHERE id=?", (signal["id"],)).fetchone())
+        kept_position = _as_dict(
+            store.conn.execute("SELECT * FROM positions WHERE ticker='UGPA3'").fetchone()
+        )
+        assert kept == frozen
+        assert kept_position == frozen_position
+        assert kept["status"] == "aguardando_compra"
+        assert kept["late"] == 1
+        assert kept_position["status"] == "aguardando_compra"
+        assert store.conn.execute(
+            "SELECT COUNT(*) AS n FROM signals WHERE ticker='UGPA3'"
+        ).fetchone()["n"] == 1
+        assert store.conn.execute(
+            "SELECT COUNT(*) AS n FROM positions WHERE ticker='UGPA3'"
+        ).fetchone()["n"] == 1
+        ugpa_buys = [body for body in sent if "COMPRA —" in body and "UGPA3" in body]
+        assert ugpa_buys == [sent[0]]
+        assert all(body.startswith("SIMULAÇÃO") for body in sent)
+        vtru_buys = [body for body in sent if "COMPRA —" in body and "VTRU3" in body]
+        assert len(vtru_buys) == 1
+        assert vtru_buys[0].startswith("SIMULAÇÃO")
+    finally:
+        store.close()
+
+
+def test_failure_after_compra_send_does_not_resend(tmp_path, monkeypatch):
+    """O envio volta, a transação ainda aberta é desfeita. A posição já foi commitada."""
+    sent = []
+    store = Store(tmp_path / "alertas.sqlite")
+
+    def explode(_token, _chat, body):
+        sent.append(body)
+        store.conn.rollback()
+        raise RuntimeError("falha depois do envio")
+
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", explode)
+    published = datetime(2026, 10, 21, 18, 0, tzinfo=TZ)
+    _seed(store, "1587932", "Aprovaram dividendos de R$ 1,00 por ação.", published)
+    moment = datetime(2026, 10, 21, 19, 0, tzinfo=TZ)
+    try:
+        first = Report(now=moment, dry_run=False)
+        _scan(_cfg(tmp_path, moment, dry_run=False), store, CAL, first)
+        assert len(sent) == 1
+        assert sent[0].startswith("SIMULAÇÃO")
+        assert "COMPRA —" in sent[0]
+        position = store.conn.execute("SELECT status FROM positions").fetchone()
+        assert position["status"] == "aguardando_compra"
+        alert = store.conn.execute("SELECT status FROM alerts WHERE kind='compra'").fetchone()
+        assert alert["status"] == "sent"
+        signal = store.conn.execute("SELECT status FROM signals").fetchone()
+        assert signal["status"] == "aguardando_compra"
+        again = Report(now=moment, dry_run=False)
+        _scan(_cfg(tmp_path, moment, dry_run=False), store, CAL, again)
+        assert sent == [sent[0]]
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM positions").fetchone()["n"] == 1
+        assert store.conn.execute("SELECT status FROM positions").fetchone()["status"] == "aguardando_compra"
+        assert store.conn.execute("SELECT status FROM signals").fetchone()["status"] == "aguardando_compra"
+        assert store.conn.execute("SELECT status FROM alerts WHERE kind='compra'").fetchone()["status"] == "sent"
+    finally:
+        store.close()
