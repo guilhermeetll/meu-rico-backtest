@@ -51,6 +51,7 @@ from alertas_dividendo.strategy import (
     index_return,
     jcp_net,
     passes_liquidity,
+    same_cash_event,
     trade_return,
 )
 from alertas_dividendo.telegram_api import send_message
@@ -561,6 +562,7 @@ def _priors(store: Store, ticker: str) -> list[Prior]:
 
 
 def _scan(cfg: Config, store: Store, calendar: Calendar, report: Report) -> None:
+    _retry_pending_alerts(cfg, store, report)
     issuers = _ensure_issuers(store, report)
     start = (cfg.now.date() - timedelta(days=cfg.lookback_days)).isoformat()
     docs = [row for row in store.documents_since(start) if relevant_row(row)]
@@ -621,21 +623,36 @@ def _scan(cfg: Config, store: Store, calendar: Calendar, report: Report) -> None
             continue
         texts = {doc["protocol"]: _document_text_cfg(cfg, store, doc, published.date()) for doc in group}
         for ticker, snap in liquid:
-            events = _cash_events(group, texts, ticker, published.date())
-            if not events:
-                _emit_ticker(
-                    cfg, store, calendar, report, ticker, issuer, company, group, None, None,
-                    snap, published, time_known, open_slots, yield_session,
-                )
+            try:
+                events = _cash_events(group, texts, ticker, published.date())
+            except Exception as exc:
+                _note_ticker_failure(store, report, ticker, earliest["protocol"], exc)
                 continue
-            for source_doc, dist in events:
-                opened = _emit_ticker(
-                    cfg, store, calendar, report, ticker, issuer, company, group, source_doc, dist,
-                    snap, published, time_known, open_slots, yield_session,
-                )
+            pending = events or [(None, None)]
+            for source_doc, dist in pending:
+                protocol = source_doc["protocol"] if source_doc is not None else earliest["protocol"]
+                try:
+                    opened = _emit_ticker(
+                        cfg, store, calendar, report, ticker, issuer, company, group, source_doc, dist,
+                        snap, published, time_known, open_slots, yield_session,
+                    )
+                except Exception as exc:
+                    _note_ticker_failure(store, report, ticker, protocol, exc)
+                    continue
                 if opened:
                     open_slots += 1
     _record_b3_checks(cfg, store, report)
+
+
+def _note_ticker_failure(store: Store, report: Report, ticker: str, protocol: str, exc: Exception) -> None:
+    """Um papel que falha não pode derrubar o resto da varredura."""
+    line = f"{ticker} protocolo {protocol} {type(exc).__name__}"
+    report.errors.append(line)
+    try:
+        store.log_event("falha", ticker=ticker, protocol=protocol, detail=f"{line}: {exc}")
+    except Exception:
+        log.warning("não registrei a falha de %s", ticker, exc_info=True)
+    log.warning("varredura de %s protocolo %s falhou", ticker, protocol, exc_info=True)
 
 
 def relevant_row(doc) -> bool:
@@ -662,6 +679,65 @@ def relevant_row(doc) -> bool:
 def _signal_key(ticker: str, kind: str, gross: float | None, data_com: date | None, approval: date | None, protocol: str) -> str:
     anchor = data_com or approval
     return f"{ticker}|{kind}|{(gross or 0):.4f}|{anchor.isoformat() if anchor else ''}|{protocol}"
+
+
+def _mark_duplicate_buy(store, report, ticker: str, protocol: str) -> bool:
+    line = f"{ticker} protocolo {protocol} duplicado"
+    report.ignore(line)
+    store.log_event("duplicado", ticker=ticker, protocol=protocol, detail=line)
+    return True
+
+
+def _position_same_announcement(store, ticker: str, kind: str, gross: float | None, data_com: date | None, approval: date | None):
+    """Posição aberta do mesmo anúncio, pelo id do sinal gravado.
+
+    Só entra `aguardando_compra` e `aberta`. É duplicata quando a data-com
+    coincide ou um dos lados está vazio. Duas datas preenchidas e diferentes
+    são parcelas novas, ainda que o valor e a aprovação sejam os mesmos.
+    """
+    if gross is None:
+        return None
+    approval_iso = approval.isoformat() if approval is not None else None
+    if approval_iso is None:
+        clause = "AND s.approval_date IS NULL"
+        params: tuple = (ticker, kind)
+    else:
+        clause = "AND s.approval_date=?"
+        params = (ticker, kind, approval_iso)
+    rows = store.conn.execute(
+        f"""
+        SELECT p.id AS position_id, p.signal_id, p.status AS position_status, s.data_com, s.gross_per_share
+        FROM positions p
+        JOIN signals s ON s.id = p.signal_id
+        WHERE s.ticker=? AND s.kind=?
+        AND p.status IN ('aguardando_compra','aberta')
+        {clause}
+        """,
+        params,
+    ).fetchall()
+    for row in rows:
+        stored_gross = row["gross_per_share"]
+        if stored_gross is None or not same_cash_event(float(stored_gross), float(gross)):
+            continue
+        stored_com = date.fromisoformat(row["data_com"]) if row["data_com"] else None
+        if stored_com is not None and data_com is not None and stored_com != data_com:
+            continue
+        return row
+    return None
+
+
+def _position_already_open(store, report, ticker, kind, gross, data_com, approval, doc) -> bool:
+    """Já existe posição para este evento. Não reenvia COMPRA nem reescreve o status.
+
+    A busca é pelo id do sinal gravado (mesmo anúncio e mesmo caixa), não pela
+    chave montada com a data-com e o protocolo desta leitura.
+    """
+    existing = store.signal_by_dedupe(_signal_key(ticker, kind, gross, data_com, approval, doc["protocol"]))
+    if existing is not None and store.position_by_signal(int(existing["id"])) is not None:
+        return _mark_duplicate_buy(store, report, ticker, doc["protocol"])
+    if _position_same_announcement(store, ticker, kind, gross, data_com, approval) is not None:
+        return _mark_duplicate_buy(store, report, ticker, doc["protocol"])
+    return False
 
 
 def realized_returns(store: Store) -> list[float]:
@@ -789,6 +865,8 @@ def _emit_ticker(
         approval, data_com, data_ex, published, time_known, decision_doc,
     ):
         return False
+    if _position_already_open(store, report, ticker, kind, gross, data_com, approval, decision_doc):
+        return False
     note = ""
     if data_com is not None and data_com <= cfg.now.date():
         mismatch = _cross_check(issuer, data_com, gross or 0, kind)
@@ -830,9 +908,27 @@ def _emit_ticker(
     if cfg.dry_run:
         report.messages.append(body)
         return True
-    signal_id = _insert_signal(
-        store, cfg, ticker, company, issuer, kind, gross, net, decision, snap, approval, data_com, data_ex, published, time_known, decision_doc, "aguardando_compra", "",
+    return _commit_buy_then_send(
+        cfg, store, report, ticker, company, issuer, kind, gross, net, decision, snap,
+        approval, data_com, data_ex, published, time_known, decision_doc, plan, body,
     )
+
+
+def _commit_buy_then_send(
+    cfg, store, report, ticker, company, issuer, kind, gross, net, decision, snap,
+    approval, data_com, data_ex, published, time_known, doc, plan, body,
+) -> bool:
+    """Grava sinal e posição com o alerta pendente, e só marca enviado depois do Telegram.
+
+    O commit da posição acontece antes da chamada. Se o Telegram falha, o alerta
+    continua `pendente` e a próxima varredura tenta de novo, sem abrir outra compra.
+    """
+    signal_id = _insert_signal(
+        store, cfg, ticker, company, issuer, kind, gross, net, decision, snap,
+        approval, data_com, data_ex, published, time_known, doc, "aguardando_compra", "",
+    )
+    if store.position_by_signal(signal_id) is not None:
+        return _mark_duplicate_buy(store, report, ticker, doc["protocol"])
     store.update_signal(signal_id, status="aguardando_compra", late=0)
     store.insert_position(
         {
@@ -862,8 +958,47 @@ def _emit_ticker(
     )
     anchor = data_com or approval
     key = f"compra|{ticker}|{kind}|{gross:.4f}|{anchor.isoformat() if anchor else ''}"
-    _queue(cfg, store, report, key, "compra", signal_id, body)
+    fresh = store.insert_alert(key, "compra", signal_id, body, "pendente")
+    store.commit()
+    if fresh:
+        _deliver_compra(cfg, store, report, key, body)
     return True
+
+
+def _compra_label(key: str) -> str:
+    parts = key.split("|")
+    if len(parts) >= 2 and parts[0] == "compra":
+        return parts[1]
+    return key
+
+
+def _deliver_compra(cfg: Config, store: Store, report: Report, key: str, body: str) -> bool:
+    """Envia uma COMPRA já gravada. Só vira `sent` depois que o Telegram confirma."""
+    try:
+        send_message(cfg.token, cfg.chat_id, body)
+    except Exception as exc:
+        name = type(exc).__name__
+        line = (
+            f"compra pendente {_compra_label(key)}: Telegram falhou ({name}); "
+            "tenta de novo na próxima varredura"
+        )
+        report.errors.append(line)
+        store.log_event("telegram", detail=line)
+        log.warning("%s", line)
+        return False
+    store.mark_alert(key, "sent")
+    report.messages.append(body)
+    return True
+
+
+def _retry_pending_alerts(cfg: Config, store: Store, report: Report) -> None:
+    """Reenvia COMPRAs que ficaram pendentes. O que o Telegram já confirmou não sai de novo."""
+    if cfg.dry_run:
+        return
+    for row in store.pending_alerts():
+        if row["kind"] != "compra":
+            continue
+        _deliver_compra(cfg, store, report, row["dedupe_key"], row["body"])
 
 
 def _missed_deadline(cfg, store, report, ticker, company, issuer, kind, gross, net, decision, snap, approval, data_com, data_ex, published, time_known, doc) -> bool:

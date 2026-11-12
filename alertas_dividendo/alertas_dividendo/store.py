@@ -554,6 +554,12 @@ class Store:
         )
         return int(cursor.lastrowid)
 
+    def position_by_signal(self, signal_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM positions WHERE signal_id=?",
+            (signal_id,),
+        ).fetchone()
+
     def positions_active(self) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM positions WHERE status IN ('aguardando_compra','aberta') ORDER BY id"
@@ -581,6 +587,11 @@ class Store:
     def signal_by_id(self, signal_id: int) -> sqlite3.Row:
         return self.conn.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
 
+    def pending_alerts(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM alerts WHERE status='pendente' ORDER BY created_at, dedupe_key"
+        ).fetchall()
+
     def alert_exists(self, key: str) -> bool:
         row = self.conn.execute(
             "SELECT 1 FROM alerts WHERE dedupe_key=? AND status IN ('reserved','sent','uncertain')",
@@ -590,15 +601,23 @@ class Store:
 
     def reserve_alert(self, key: str, kind: str, signal_id: int | None, body: str) -> bool:
         """Reserva antes de enviar, para não duplicar se o processo cair no meio."""
+        if not self.insert_alert(key, kind, signal_id, body, "reserved"):
+            return False
+        self.conn.commit()
+        return True
+
+    def insert_alert(self, key: str, kind: str, signal_id: int | None, body: str, status: str) -> bool:
+        """Grava o alerta na transação corrente, sem commit."""
+        now = datetime.now().isoformat(timespec="seconds")
+        sent_at = now if status == "sent" else None
         try:
             self.conn.execute(
                 """
-                INSERT INTO alerts (dedupe_key, kind, signal_id, body, status, created_at)
-                VALUES (?, ?, ?, ?, 'reserved', ?)
+                INSERT INTO alerts (dedupe_key, kind, signal_id, body, status, created_at, sent_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (key, kind, signal_id, body, datetime.now().isoformat(timespec="seconds")),
+                (key, kind, signal_id, body, status, now, sent_at),
             )
-            self.conn.commit()
             return True
         except sqlite3.IntegrityError:
             return False
