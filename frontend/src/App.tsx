@@ -52,11 +52,50 @@ function when(iso: string | null): string {
   return new Date(iso).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
 }
 
+function percentLabel(value: unknown): string {
+  const number = Number(value) * 100;
+  return `${number.toFixed(1).replace(".", ",")}%`;
+}
+
 function variantLabel(params: Record<string, unknown>): string {
+  if (params.exit !== undefined && params.signal_anchor === undefined) {
+    const exit = String(params.exit);
+    const hold = exit === "eod" ? "fim do dia" : `${exit} min`;
+    const threshold = params.threshold !== undefined ? `${percentLabel(params.threshold)} · ` : "";
+    return `Gap · ${threshold}${hold}`;
+  }
+  if (params.range_minutes !== undefined && params.signal_anchor === undefined) {
+    const name = params.execution === "confirm" ? "orb_confirm · " : "";
+    return `ORB · ${name}${params.range_minutes} min`;
+  }
   const anchor = params.signal_anchor === "prior_close" ? "Fechamento anterior" : "Abertura do pregão";
   const end = params.signal_end === "cash_open" ? "Fim na abertura do à vista" : "Fim na abertura do WIN";
   const windowName = params.trade_window === "before_cash_auction" ? "Antes do leilão do à vista" : "Até o fechamento do WIN";
   return `${anchor} · ${end} · ${windowName}`;
+}
+
+function gridVariants(strategy: string): Record<string, unknown>[] {
+  if (strategy === "gap_reversal") {
+    const thresholds = [0.005, 0.01, 0.015];
+    const core = thresholds.map((threshold) => ({ threshold, exit: "15" }));
+    const extras = ["30", "eod"].flatMap((exit) => thresholds.map((threshold) => ({ threshold, exit })));
+    return [...core, ...extras];
+  }
+  if (strategy === "opening_range_breakout") {
+    const ranges = [5, 15, 30];
+    const stop = ranges.map((range_minutes) => ({ range_minutes, execution: "stop" }));
+    const confirm = ranges.map((range_minutes) => ({ range_minutes, execution: "confirm" }));
+    return [stop[0], ...stop.slice(1), ...confirm];
+  }
+  return ["session_open", "prior_close"].flatMap((signal_anchor) =>
+    ["session_open", "cash_open"].flatMap((signal_end) =>
+      ["session_close", "before_cash_auction"].map((trade_window) => ({
+        signal_anchor,
+        signal_end,
+        trade_window,
+      })),
+    ),
+  );
 }
 
 function MetricCards({ metrics }: { metrics: Metrics }) {
@@ -120,6 +159,11 @@ export function App() {
   const [useExample, setUseExample] = useState(true);
   const [file, setFile] = useState<File | null>(null);
   const [columnMap, setColumnMap] = useState("");
+  const [strategy, setStrategy] = useState("intraday_momentum");
+  const [gapExit, setGapExit] = useState("15");
+  const [gapThreshold, setGapThreshold] = useState(0.005);
+  const [rangeMinutes, setRangeMinutes] = useState(5);
+  const [orbExecution, setOrbExecution] = useState("stop");
   const [signalMinutes, setSignalMinutes] = useState(30);
   const [signalAnchor, setSignalAnchor] = useState("session_open");
   const [signalEnd, setSignalEnd] = useState("session_open");
@@ -132,6 +176,8 @@ export function App() {
   const [skipAshWednesday, setSkipAshWednesday] = useState(true);
   const [minBarCoverage, setMinBarCoverage] = useState(0.9);
   const [edgeTolerance, setEdgeTolerance] = useState(5);
+  const [openTolerance, setOpenTolerance] = useState(30);
+  const [closeTolerance, setCloseTolerance] = useState(15);
   const [fee, setFee] = useState(0.5);
   const [feePercent, setFeePercent] = useState(0);
   const [slippage, setSlippage] = useState(1);
@@ -213,7 +259,7 @@ export function App() {
       .filter(Boolean)
       .map(Number);
     return {
-      strategy: "intraday_momentum",
+      strategy,
       symbol,
       data_source: dataSource,
       timeframe,
@@ -221,20 +267,7 @@ export function App() {
       end,
       csv_source: csvSource,
       column_map: parsedMap,
-      strategy_params: {
-        signal_minutes: signalMinutes,
-        signal_anchor: signalAnchor,
-        signal_end: signalEnd,
-        trade_minutes: tradeMinutes,
-        trade_window: tradeWindow,
-        threshold,
-        quantity,
-        session_open: sessionOpen,
-        session_close: sessionClose,
-        skip_ash_wednesday: skipAshWednesday,
-        min_bar_coverage: minBarCoverage,
-        edge_tolerance_minutes: edgeTolerance,
-      },
+      strategy_params: strategyParams(),
       costs: { fee_per_side: fee, slippage_ticks: slippage, fee_rate: feePercent / 100 },
       tax_rate: tax / 100,
       initial_capital: capital,
@@ -254,6 +287,36 @@ export function App() {
         optimize_metric: metric,
         param_grid: gridValues.length ? { threshold: gridValues } : null,
       },
+    };
+  }
+
+  function strategyParams(): Record<string, unknown> {
+    const coverage: Record<string, unknown> = {
+      quantity,
+      min_bar_coverage: minBarCoverage,
+      edge_tolerance_minutes: edgeTolerance,
+    };
+    if (strategy === "gap_reversal" || strategy === "opening_range_breakout") {
+      coverage.open_tolerance_minutes = openTolerance;
+      coverage.close_tolerance_minutes = closeTolerance;
+    }
+    if (strategy === "gap_reversal") {
+      return { threshold: gapThreshold, exit: gapExit, ...coverage };
+    }
+    if (strategy === "opening_range_breakout") {
+      return { range_minutes: rangeMinutes, execution: orbExecution, ...coverage };
+    }
+    return {
+      signal_minutes: signalMinutes,
+      signal_anchor: signalAnchor,
+      signal_end: signalEnd,
+      trade_minutes: tradeMinutes,
+      trade_window: tradeWindow,
+      threshold,
+      session_open: sessionOpen,
+      session_close: sessionClose,
+      skip_ash_wednesday: skipAshWednesday,
+      ...coverage,
     };
   }
 
@@ -279,18 +342,7 @@ export function App() {
       const payload = await buildRequest();
       setStudy(await runStudy({
         ...payload,
-        variants: [
-          "session_open",
-          "prior_close",
-        ].flatMap((signal_anchor) =>
-          ["session_open", "cash_open"].flatMap((signal_end) =>
-            ["session_close", "before_cash_auction"].map((trade_window) => ({
-              signal_anchor,
-              signal_end,
-              trade_window,
-            })),
-          ),
-        ),
+        variants: gridVariants(strategy),
       }));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Não foi possível comparar as variantes.");
@@ -314,8 +366,8 @@ export function App() {
         <div>
           <h1 className="brand">Meu Rico <span>Backtest</span></h1>
           <p className="lede">
-            Simulação de day trade na B3. A primeira estratégia é o momentum intraday do WIN:
-            o sinal da manhã define a direção e a operação acontece no fim do pregão ou antes do leilão do à vista.
+            Simulação de day trade na B3. As estratégias pré-registradas são o momentum
+            intraday, a reversão do gap de abertura e o rompimento da faixa de abertura.
           </p>
         </div>
         <div className="badge">Nenhuma ordem é enviada</div>
@@ -396,6 +448,69 @@ export function App() {
           <fieldset>
             <legend>Estratégia</legend>
             <label>
+              Estratégia
+              <select value={strategy} onChange={(event) => setStrategy(event.target.value)}>
+                <option value="intraday_momentum">Momentum intraday</option>
+                <option value="gap_reversal">Reversão do gap de abertura</option>
+                <option value="opening_range_breakout">Rompimento da faixa de abertura</option>
+              </select>
+            </label>
+            {strategy === "gap_reversal" && (
+              <>
+                <label>
+                  Limiar
+                  <select value={gapThreshold} onChange={(event) => setGapThreshold(Number(event.target.value))}>
+                    <option value={0.005}>0,5%</option>
+                    <option value={0.01}>1%</option>
+                    <option value={0.015}>1,5%</option>
+                  </select>
+                </label>
+                <label>
+                  Saída
+                  <select value={gapExit} onChange={(event) => setGapExit(event.target.value)}>
+                    <option value="15">15 minutos</option>
+                    <option value="30">30 minutos</option>
+                    <option value="eod">Fim do dia</option>
+                  </select>
+                </label>
+                <p className="hint">
+                  Gap = abertura / fechamento anterior − 1. Os limiares 0,5%, 1% e 1,5% são os mesmos para WIN e ações. Com negócios do tickercsv, a entrada é o último negócio até 1 minuto depois do primeiro. Sem eles, é a primeira barra que começa pelo menos 1 minuto depois, nunca a barra da abertura. O núcleo sai 15 minutos depois da entrada; 30 minutos e o fim do dia são extras.
+                </p>
+                <label>
+                  Quantidade
+                  <input type="number" min={1} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} />
+                </label>
+              </>
+            )}
+            {strategy === "opening_range_breakout" && (
+              <>
+                <label>
+                  Faixa
+                  <select value={rangeMinutes} onChange={(event) => setRangeMinutes(Number(event.target.value))}>
+                    <option value={5}>5 minutos</option>
+                    <option value={15}>15 minutos</option>
+                    <option value={30}>30 minutos</option>
+                  </select>
+                </label>
+                <label>
+                  Execução
+                  <select value={orbExecution} onChange={(event) => setOrbExecution(event.target.value)}>
+                    <option value="stop">Ordem stop na borda</option>
+                    <option value="confirm">orb_confirm</option>
+                  </select>
+                </label>
+                <p className="hint">
+                  A faixa começa no primeiro negócio. No núcleo, a compra só dispara acima da máxima e a venda só abaixo da mínima. Encostar na borda não entra. Nas barras, o preço cru é a borda mais 1 tick, ou a abertura se ela já estiver mais longe, e o slippage soma outro tick. O stop dispara quando o preço encosta ou atravessa o outro extremo. orb_confirm espera o fechamento fora da faixa e entra na abertura da barra seguinte. A saída forçada é no fim do contínuo, às 16:55, ou no último negócio regular se o pregão parar antes. O núcleo é a faixa de 5 minutos em ordem stop. As faixas de 15 e 30 minutos e as três de orb_confirm são extras e entram no N.
+                </p>
+                <label>
+                  Quantidade
+                  <input type="number" min={1} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} />
+                </label>
+              </>
+            )}
+            {strategy === "intraday_momentum" && (
+            <>
+            <label>
               Referência do sinal
               <select value={signalAnchor} onChange={(event) => setSignalAnchor(event.target.value)}>
                 <option value="session_open">Abertura do pregão até o fim da primeira janela</option>
@@ -422,6 +537,9 @@ export function App() {
                 <option value="before_cash_auction">Antes do leilão de fechamento do à vista</option>
               </select>
             </label>
+            <p className="hint">
+              Com negócios do tickercsv, o preço de um horário é o último negócio até esse instante. O sinal, a entrada e a saída usam esse preço. Sem os negócios, fica a barra: o open da que começa no horário, ou o close da que termina nele.
+            </p>
             <div className="grid-2">
               <label>
                 Sinal (min)
@@ -463,6 +581,13 @@ export function App() {
             <p className="hint">
               Nesses dias o à vista e o WIN abrem às 13:00 e o leilão do à vista é 17:55–18:00. O padrão é não operar. Se desmarcar, os dois fins de sinal usam essa abertura e a janela antes do leilão passa a ser 17:25–17:55.
             </p>
+            {tradeWindow === "before_cash_auction" ? (
+              <p className="hint">A meia hora termina quando começa o leilão do à vista. De outubro/2023 a setembro/2026, inclusive no inverno, isso é 16:25–16:55. Na Quarta-feira de Cinzas o leilão começa às 17:55, se o dia não for pulado.</p>
+            ) : (
+              <p className="hint">A entrada é no início dos últimos minutos e a saída é no fechamento informado, ou no horário automático do ativo.</p>
+            )}
+            </>
+            )}
             <div className="grid-2">
               <label>
                 Cobertura mínima
@@ -487,14 +612,37 @@ export function App() {
                 />
               </label>
             </div>
-            <p className="hint">
-              Cada janela precisa da barra de início, com essa tolerância, e da barra que fecha no fim. A fração é a cobertura mínima; zero desliga só a fração. Pregão incompleto é pulado e o motivo aparece no resultado.
-            </p>
-            {tradeWindow === "before_cash_auction" ? (
-              <p className="hint">A meia hora termina quando começa o leilão do à vista. De outubro/2023 a setembro/2026, inclusive no inverno, isso é 16:25–16:55. Na Quarta-feira de Cinzas o leilão começa às 17:55, se o dia não for pulado.</p>
-            ) : (
-              <p className="hint">A entrada é no início dos últimos minutos e a saída é no fechamento informado, ou no horário automático do ativo.</p>
+            {strategy !== "intraday_momentum" && (
+              <div className="grid-2">
+                <label>
+                  Tolerância da abertura (min)
+                  <input
+                    type="number"
+                    min={0}
+                    max={180}
+                    step={1}
+                    value={openTolerance}
+                    onChange={(event) => setOpenTolerance(Number(event.target.value))}
+                  />
+                </label>
+                <label>
+                  Tolerância do fechamento (min)
+                  <input
+                    type="number"
+                    min={0}
+                    max={120}
+                    step={1}
+                    value={closeTolerance}
+                    onChange={(event) => setCloseTolerance(Number(event.target.value))}
+                  />
+                </label>
+              </div>
             )}
+            <p className="hint">
+              {strategy === "intraday_momentum"
+                ? "Cada janela precisa da barra de início, com essa tolerância, e da barra que fecha no fim. A fração é a cobertura mínima; zero desliga só a fração. Pregão incompleto é pulado e o motivo aparece no resultado."
+                : "A abertura é o primeiro negócio, até 30 minutos depois do calendário. A faixa e a cobertura começam nele. A entrada do gap espera mais 1 minuto e não usa a barra da abertura. Se o contínuo para até 15 minutos antes do leilão, a posição sai no último negócio, com aviso."}
+            </p>
           </fieldset>
           <fieldset>
             <legend>Custos, slippage e IR</legend>
@@ -528,6 +676,9 @@ export function App() {
               Configurações testadas (N do Sharpe deflacionado)
               <input type="number" min={1} value={nTrials} onChange={(event) => setNTrials(Number(event.target.value))} />
             </label>
+            <p className="hint">
+              O estudo usa pelo menos o número de variantes da grade. Um N maior é o total acumulado de configurações do projeto.
+            </p>
           </fieldset>
           <fieldset>
             <legend>Amostra</legend>
@@ -590,10 +741,10 @@ export function App() {
             {running ? "Rodando backtest…" : "Rodar backtest"}
           </button>
           <button className="secondary" type="button" onClick={() => void onCompare()} disabled={running || comparing}>
-            {comparing ? "Comparando variantes…" : "Comparar sinal e janela"}
+            {comparing ? "Comparando variantes…" : strategy === "intraday_momentum" ? "Comparar sinal e janela" : "Rodar a grade pré-registrada"}
           </button>
           <p className="hint">
-            WIN: R$ 0,50 por contrato por lado e 1 tick (5 pontos = R$ 1,00). Ação: 0,023% por lado sobre o valor negociado e 1 tick de R$ 0,01. A comparação cruza referência, fim do sinal e janela (oito variantes) e o Sharpe deflacionado de cada uma usa esse total.
+            WIN: R$ 0,50 por contrato por lado e 1 tick (5 pontos = R$ 1,00). Ação: 0,023% por lado sobre o valor negociado e 1 tick de R$ 0,01. O núcleo do gap tem três limiares com saída de 15 minutos; o do ORB é a faixa de 5 minutos. Os extras (saídas de 30 minutos e fim do dia, faixas de 15 e 30) entram no mesmo N.
           </p>
         </form>
         <section className="panel">
@@ -725,7 +876,7 @@ export function App() {
         <section className="panel history">
           <h2>Estudo · {study.n_variants} variantes</h2>
           <p className="hint">
-            Sharpe deflacionado de cada linha usa N = {study.n_trials}, o total de configurações deste estudo.
+            Sharpe deflacionado de cada linha usa N = {study.n_trials}. Se o formulário pedir um N maior que a grade, esse é o acumulado do projeto.
           </p>
           <div className="scroll">
             <table>

@@ -43,6 +43,27 @@ def prior_close_same_contract(bars: pd.DataFrame, day: date, contract: str) -> f
     return close
 
 
+def previous_close(bars: pd.DataFrame, day: date, contract: str | None) -> float | None:
+    """Last close before `day`.
+
+    With a contract, that close has to belong to the same series. Equities
+    and other frames without a contract use the previous session in the
+    frame. None means the signal is skipped.
+    """
+    if contract:
+        return prior_close_same_contract(bars, day, contract)
+    if bars.empty:
+        return None
+    previous = bars.loc[bars["timestamp"].dt.date < day]
+    if previous.empty:
+        return None
+    ordered = previous.sort_values("timestamp")
+    close = float(ordered.iloc[-1]["close"])
+    if close <= 0:
+        return None
+    return close
+
+
 def return_versus_prior_close(bars: pd.DataFrame, day: date, contract: str, price: float) -> float | None:
     """Simple return against the previous close of the same contract.
 

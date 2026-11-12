@@ -33,6 +33,46 @@ def meta_root() -> Path:
     return Path(os.environ.get("B3_META_ROOT", "/data/b3_ticks_meta"))
 
 
+class B3SessionTrades:
+    """One session of prints in memory. The previous session is dropped."""
+
+    def __init__(self, files: dict[tuple[date, str], Path], include_after_hours: bool):
+        self.files = files
+        self.include_after_hours = include_after_hours
+        self._key: tuple | None = None
+        self._frame: pd.DataFrame | None = None
+
+    def get(self, day, contract):
+        ticker = str(contract).upper() if contract else None
+        path = self.files.get((day, ticker)) if ticker else None
+        resolved = ticker
+        if path is None:
+            matches = [(name, item) for (session, name), item in self.files.items() if session == day]
+            if ticker is not None:
+                matches = [(name, item) for name, item in matches if name == ticker]
+            if len(matches) != 1:
+                self._key = (day, ticker)
+                self._frame = None
+                return None
+            resolved, path = matches[0]
+        key = (day, resolved)
+        if key == self._key:
+            return self._frame
+        try:
+            frame = read_trades(path, include_after_hours=self.include_after_hours)
+        except Exception as exc:  # noqa: BLE001 - the strategy falls back to OHLC
+            logger.warning("B3 trades unreadable for %s: %s", path, exc)
+            frame = None
+        if frame is not None and not frame.empty:
+            frame = frame.loc[:, ["timestamp", "price"]].copy()
+            frame["contract"] = resolved
+        else:
+            frame = None
+        self._key = key
+        self._frame = frame
+        return frame
+
+
 class B3TradesAdapter:
     """Reads original B3 trade ZIPs and downloads the ones that are missing.
 
@@ -76,10 +116,11 @@ class B3TradesAdapter:
         minutes = {"1min": 1, "5min": 5, "60min": 60}[request.timeframe]
         warnings: list[str] = []
         frames: list[pd.DataFrame] = []
+        files: dict[tuple[date, str], Path] = {}
         day = request.start
         while day <= request.end:
             if day.weekday() < 5:
-                frame, note = self._load_day(
+                frame, note, ticker = self._load_day(
                     request.symbol,
                     day,
                     request.timeframe,
@@ -88,6 +129,10 @@ class B3TradesAdapter:
                 )
                 if frame is not None and not frame.empty:
                     frames.append(frame)
+                    if ticker:
+                        path = self.local_path(ticker, day)
+                        if _usable(path):
+                            files[(day, ticker.upper())] = path
                 if note:
                     warnings.append(note)
             day += timedelta(days=1)
@@ -107,35 +152,36 @@ class B3TradesAdapter:
             )
         if not request.include_after_hours:
             warnings.append("Negócios de after-market (TipoSessaoPregao 6) ficaram de fora das barras.")
-        return LoadResult(bars=bars, warnings=_unique(warnings))
+        trades = B3SessionTrades(files, request.include_after_hours) if files else None
+        return LoadResult(bars=bars, warnings=_unique(warnings), trades=trades)
 
     def _load_day(self, symbol: str, day: date, timeframe: str, minutes: int, include_after_hours: bool):
         ticker, note = self._resolve_ticker(symbol, day)
         if ticker is None:
-            return None, note
+            return None, note, None
         path = self.local_path(ticker, day)
         if not _usable(path):
             expected = self._manifest_trades(ticker, day)
             if expected == 0:
-                return None, f"{day.isoformat()}: o manifest marca {ticker} sem negócios."
+                return None, f"{day.isoformat()}: o manifest marca {ticker} sem negócios.", None
             url = B3_URL.format(ticker=ticker, day=day.isoformat())
             try:
                 download_raw(url, path)
                 logger.info("B3 saved %s", path)
             except FileNotFoundError:
                 listed = " O manifest espera esse arquivo." if expected else ""
-                return None, f"{day.isoformat()}: sem {path.name} e a B3 respondeu 404 para {ticker}.{listed}"
+                return None, f"{day.isoformat()}: sem {path.name} e a B3 respondeu 404 para {ticker}.{listed}", None
             except Exception as exc:  # noqa: BLE001 - surface a short warning per day
                 logger.warning("B3 download failed for %s: %s", url, exc)
-                return None, f"{day.isoformat()}: falha ao baixar {ticker} ({exc.__class__.__name__})."
+                return None, f"{day.isoformat()}: falha ao baixar {ticker} ({exc.__class__.__name__}).", None
         try:
             frame = self._bars_for_file(path, ticker, day, timeframe, minutes, include_after_hours)
         except Exception as exc:  # noqa: BLE001
             logger.warning("B3 parse failed for %s: %s", path, exc)
-            return None, f"{day.isoformat()}: não foi possível ler {path.name} ({exc.__class__.__name__})."
+            return None, f"{day.isoformat()}: não foi possível ler {path.name} ({exc.__class__.__name__}).", None
         if frame.empty:
-            return None, f"{day.isoformat()}: {ticker} sem negócios do pregão regular."
-        return frame, None
+            return None, f"{day.isoformat()}: {ticker} sem negócios do pregão regular.", None
+        return frame, None, ticker
 
     def local_path(self, ticker: str, day: date) -> Path:
         return self.root / ticker.upper() / f"{day.isoformat()}.zip"
@@ -306,6 +352,32 @@ def aggregate_trade_file(
     return grouped
 
 
+def read_trades(path: Path, include_after_hours: bool = False) -> pd.DataFrame:
+    """Individual prints from a tickercsv ZIP: timestamp and price, file order.
+
+    The same filters as the bars apply. AcaoAtualizacao other than 0 is
+    dropped, and after-market session 6 stays out unless requested. The
+    caller uses the first print that touches a level. Nothing is downloaded.
+    """
+    pieces: list[pd.DataFrame] = []
+    for chunk in _trade_chunks(path):
+        piece = _trades_from_chunk(chunk, include_after_hours)
+        if not piece.empty:
+            pieces.append(piece)
+    columns = ["timestamp", "price"]
+    if not pieces:
+        return pd.DataFrame(columns=columns)
+    combined = pd.concat(pieces, ignore_index=True)
+    combined["timestamp"] = pd.to_datetime(combined["timestamp"], utc=False)
+    if combined["timestamp"].dt.tz is None:
+        combined["timestamp"] = combined["timestamp"].dt.tz_localize(
+            TZ_NAME, ambiguous="infer", nonexistent="shift_forward",
+        )
+    else:
+        combined["timestamp"] = combined["timestamp"].dt.tz_convert(TZ_NAME)
+    return combined.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
+
+
 def contract_prior_close(
     root: Path,
     contract: str,
@@ -365,7 +437,27 @@ def _trade_chunks(path: Path):
             archive.close()
 
 
-def _bars_from_chunk(chunk: pd.DataFrame, minutes: int, include_after_hours: bool = False) -> pd.DataFrame:
+def _trades_from_chunk(chunk: pd.DataFrame, include_after_hours: bool = False) -> pd.DataFrame:
+    prepared = _prepared_prints(chunk, include_after_hours)
+    if prepared is None or prepared.empty:
+        return pd.DataFrame(columns=["timestamp", "price"])
+    clock = prepared["clock"]
+    stamp = (
+        prepared["day"]
+        + " "
+        + clock.str.slice(0, 2)
+        + ":"
+        + clock.str.slice(2, 4)
+        + ":"
+        + clock.str.slice(4, 6)
+        + "."
+        + clock.str.slice(6, 9)
+    )
+    built = pd.DataFrame({"timestamp": stamp, "price": prepared["price"]})
+    return built.dropna(subset=["price"])
+
+
+def _prepared_prints(chunk: pd.DataFrame, include_after_hours: bool):
     renamed = {_norm(str(column)): column for column in chunk.columns}
     required = ["preconegocio", "quantidadenegociada", "horafechamento"]
     if any(name not in renamed for name in required):
@@ -379,7 +471,7 @@ def _bars_from_chunk(chunk: pd.DataFrame, minutes: int, include_after_hours: boo
         allowed = {"1", "6"} if include_after_hours else {"1"}
         frame = frame[session.isin(allowed)]
     if frame.empty:
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        return None
     date_column = renamed.get("datanegocio", renamed.get("datareferencia"))
     if date_column is None:
         raise ValueError("Arquivo da B3 sem a data do negócio.")
@@ -392,16 +484,26 @@ def _bars_from_chunk(chunk: pd.DataFrame, minutes: int, include_after_hours: boo
         errors="coerce",
     ).fillna(0)
     clock = frame[renamed["horafechamento"]].fillna("").str.replace(r"\D", "", regex=True).str.zfill(9)
+    day = frame[date_column].astype(str).str.slice(0, 10)
+    prepared = pd.DataFrame({"day": day, "clock": clock, "price": prices, "qty": quantity})
+    return prepared.dropna(subset=["price"])
+
+
+def _bars_from_chunk(chunk: pd.DataFrame, minutes: int, include_after_hours: bool = False) -> pd.DataFrame:
+    empty = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+    prepared = _prepared_prints(chunk, include_after_hours)
+    if prepared is None or prepared.empty:
+        return empty
+    clock = prepared["clock"]
     total_minutes = clock.str.slice(0, 2).astype(int) * 60 + clock.str.slice(2, 4).astype(int)
     total_minutes = total_minutes - (total_minutes % minutes)
     hour = (total_minutes // 60).astype(str).str.zfill(2)
     minute = (total_minutes % 60).astype(str).str.zfill(2)
-    day = frame[date_column].astype(str).str.slice(0, 10)
-    timestamp = day + " " + hour + ":" + minute + ":00"
-    built = pd.DataFrame({"timestamp": timestamp, "price": prices, "qty": quantity}).dropna(subset=["price"])
+    timestamp = prepared["day"] + " " + hour + ":" + minute + ":00"
+    built = pd.DataFrame({"timestamp": timestamp, "price": prepared["price"].to_numpy(), "qty": prepared["qty"].to_numpy()})
     built = built[built["timestamp"].str.len() >= 19]
     if built.empty:
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        return empty
     return (
         built.groupby("timestamp", sort=False)
         .agg(open=("price", "first"), high=("price", "max"), low=("price", "min"), close=("price", "last"), volume=("qty", "sum"))

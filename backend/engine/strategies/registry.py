@@ -1,7 +1,11 @@
+from engine.strategies.gap import GapReversalStrategy
 from engine.strategies.momentum import IntradayMomentumStrategy
+from engine.strategies.orb import OpeningRangeBreakoutStrategy
 
 STRATEGIES: dict[str, type] = {
     "intraday_momentum": IntradayMomentumStrategy,
+    "gap_reversal": GapReversalStrategy,
+    "opening_range_breakout": OpeningRangeBreakoutStrategy,
 }
 
 

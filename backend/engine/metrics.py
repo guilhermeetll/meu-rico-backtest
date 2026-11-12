@@ -56,6 +56,33 @@ def deflated_sharpe_ratio(returns: np.ndarray, n_trials: int) -> float | None:
     return min(1.0, max(0.0, probability))
 
 
+def student_t(values) -> float | None:
+    """Mean divided by its standard error. None when there is no dispersion."""
+    sample = np.asarray(list(values), dtype=float)
+    sample = sample[np.isfinite(sample)]
+    count = int(sample.size)
+    if count < 2:
+        return None
+    std = float(sample.std(ddof=1))
+    if std <= 0:
+        return None
+    return float(sample.mean() / (std / math.sqrt(count)))
+
+
+def daily_means(observations: list[tuple[date, float]]) -> list[float]:
+    """One number per day: the average return of the trades that day.
+
+    Trades sharing a session collapse into a single observation, so they
+    do not count as independent in the t statistic.
+    """
+    buckets: dict[date, list[float]] = {}
+    for day, value in observations:
+        if value is None or not math.isfinite(value):
+            continue
+        buckets.setdefault(day, []).append(float(value))
+    return [float(np.mean(items)) for items in buckets.values()]
+
+
 def annualized_sharpe(returns: np.ndarray) -> float | None:
     values = np.asarray(returns, dtype=float)
     values = values[np.isfinite(values)]
