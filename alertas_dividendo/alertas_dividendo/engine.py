@@ -621,21 +621,36 @@ def _scan(cfg: Config, store: Store, calendar: Calendar, report: Report) -> None
             continue
         texts = {doc["protocol"]: _document_text_cfg(cfg, store, doc, published.date()) for doc in group}
         for ticker, snap in liquid:
-            events = _cash_events(group, texts, ticker, published.date())
-            if not events:
-                _emit_ticker(
-                    cfg, store, calendar, report, ticker, issuer, company, group, None, None,
-                    snap, published, time_known, open_slots, yield_session,
-                )
+            try:
+                events = _cash_events(group, texts, ticker, published.date())
+            except Exception as exc:
+                _note_ticker_failure(store, report, ticker, earliest["protocol"], exc)
                 continue
-            for source_doc, dist in events:
-                opened = _emit_ticker(
-                    cfg, store, calendar, report, ticker, issuer, company, group, source_doc, dist,
-                    snap, published, time_known, open_slots, yield_session,
-                )
+            pending = events or [(None, None)]
+            for source_doc, dist in pending:
+                protocol = source_doc["protocol"] if source_doc is not None else earliest["protocol"]
+                try:
+                    opened = _emit_ticker(
+                        cfg, store, calendar, report, ticker, issuer, company, group, source_doc, dist,
+                        snap, published, time_known, open_slots, yield_session,
+                    )
+                except Exception as exc:
+                    _note_ticker_failure(store, report, ticker, protocol, exc)
+                    continue
                 if opened:
                     open_slots += 1
     _record_b3_checks(cfg, store, report)
+
+
+def _note_ticker_failure(store: Store, report: Report, ticker: str, protocol: str, exc: Exception) -> None:
+    """Um papel que falha não pode derrubar o resto da varredura."""
+    line = f"{ticker} protocolo {protocol} {type(exc).__name__}"
+    report.errors.append(line)
+    try:
+        store.log_event("falha", ticker=ticker, protocol=protocol, detail=f"{line}: {exc}")
+    except Exception:
+        log.warning("não registrei a falha de %s", ticker, exc_info=True)
+    log.warning("varredura de %s protocolo %s falhou", ticker, protocol, exc_info=True)
 
 
 def relevant_row(doc) -> bool:
@@ -662,6 +677,22 @@ def relevant_row(doc) -> bool:
 def _signal_key(ticker: str, kind: str, gross: float | None, data_com: date | None, approval: date | None, protocol: str) -> str:
     anchor = data_com or approval
     return f"{ticker}|{kind}|{(gross or 0):.4f}|{anchor.isoformat() if anchor else ''}|{protocol}"
+
+
+def _position_already_open(store, report, ticker, kind, gross, data_com, approval, doc) -> bool:
+    """A chave já tem posição. Não reenvia COMPRA nem reescreve o status.
+
+    `insert_signal` devolve o id existente quando a chave bate. Sem esta
+    trava, o caminho de compra faz update para `aguardando_compra` e o
+    insert da posição estoura UNIQUE em `positions.signal_id`.
+    """
+    existing = store.signal_by_dedupe(_signal_key(ticker, kind, gross, data_com, approval, doc["protocol"]))
+    if existing is None or store.position_by_signal(int(existing["id"])) is None:
+        return False
+    line = f"{ticker} protocolo {doc['protocol']} duplicado"
+    report.ignore(line)
+    store.log_event("duplicado", ticker=ticker, protocol=doc["protocol"], detail=line)
+    return True
 
 
 def realized_returns(store: Store) -> list[float]:
@@ -788,6 +819,8 @@ def _emit_ticker(
         cfg, store, report, ticker, company, issuer, kind, gross, net, decision, snap,
         approval, data_com, data_ex, published, time_known, decision_doc,
     ):
+        return False
+    if _position_already_open(store, report, ticker, kind, gross, data_com, approval, decision_doc):
         return False
     note = ""
     if data_com is not None and data_com <= cfg.now.date():

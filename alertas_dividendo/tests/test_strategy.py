@@ -332,6 +332,33 @@ def test_dedupe_same_cash_event_and_data_com_update():
     assert same_cash_event(0.342059542, 0.34206)
 
 
+def test_undated_reread_after_data_com_is_not_a_new_buy():
+    """UGPA3: a COMPRA saiu sem data-com. Outro documento preenche 23/11.
+
+    A leitura seguinte do aviso original continua sem data. A âncora do sinal
+    mudou, mas o evento é o mesmo e não pode abrir outra compra.
+    """
+    published = _at(2026, 11, 11, 19, 59)
+    snap = Snapshot(10.0, _d(2026, 11, 11), "COTAHIST", 2_000_000, 60)
+    prior = Prior(1.0, _d(2026, 11, 23), "dividendo", _d(2026, 11, 11), 27)
+    again = decide(
+        ticker="UGPA3",
+        kind="dividendo",
+        gross=1.0,
+        data_com=None,
+        approval=_d(2026, 11, 11),
+        published_at=published,
+        time_known=True,
+        category_is_aviso_ou_ata=True,
+        snapshot=snap,
+        open_positions=1,
+        priors=[prior],
+        calendar=CAL,
+    )
+    assert again.action == "ignorar"
+    assert again.reason == "duplicado"
+
+
 def _cash(gross, data_com, approval, kind="dividendo", *, price=1.0, published=None):
     moment = published or _at(2026, 10, 15, 18, 0)
     return dict(

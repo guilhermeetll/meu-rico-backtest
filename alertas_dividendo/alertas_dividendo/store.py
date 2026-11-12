@@ -554,6 +554,12 @@ class Store:
         )
         return int(cursor.lastrowid)
 
+    def position_by_signal(self, signal_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM positions WHERE signal_id=?",
+            (signal_id,),
+        ).fetchone()
+
     def positions_active(self) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM positions WHERE status IN ('aguardando_compra','aberta') ORDER BY id"

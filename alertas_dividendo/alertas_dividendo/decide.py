@@ -103,9 +103,9 @@ def decide(
                 )
             if not same_cash_event(prior.gross, gross):
                 continue
-            # Duplicata só com a mesma data-com, ou com o aviso anterior ainda
-            # sem data-com e o mesmo anúncio. JCP trimestral do mesmo valor e
-            # parcelas iguais com data-com diferente seguem como eventos novos.
+            # Duplicata só com a mesma data-com, ou com o mesmo anúncio quando
+            # um dos lados ainda não tem data-com. JCP trimestral do mesmo valor
+            # e parcelas iguais com data-com diferente seguem como eventos novos.
             if same_record:
                 return Decision("ignorar", "duplicado", plan=plan)
             if prior.data_com is None and same_announcement:
@@ -118,6 +118,12 @@ def decide(
                         plan=plan,
                         exit_date=exit_session(data_com, calendar),
                     )
+                return Decision("ignorar", "duplicado", plan=plan)
+            # O aviso original não traz a data-com. Outro documento preenche a
+            # data no sinal, e a âncora deixa de ser a aprovação. Na varredura
+            # seguinte o texto antigo continua sem data e não casa com
+            # same_record nem com o ramo de atualização. Ainda é o mesmo evento.
+            if data_com is None and same_announcement and prior.data_com is not None:
                 return Decision("ignorar", "duplicado", plan=plan)
 
     if passes_liquidity(snapshot.avg_volume, snapshot.volume_sessions) == "historico_insuficiente":
