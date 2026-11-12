@@ -562,6 +562,7 @@ def _priors(store: Store, ticker: str) -> list[Prior]:
 
 
 def _scan(cfg: Config, store: Store, calendar: Calendar, report: Report) -> None:
+    _retry_pending_alerts(cfg, store, report)
     issuers = _ensure_issuers(store, report)
     start = (cfg.now.date() - timedelta(days=cfg.lookback_days)).isoformat()
     docs = [row for row in store.documents_since(start) if relevant_row(row)]
@@ -688,11 +689,11 @@ def _mark_duplicate_buy(store, report, ticker: str, protocol: str) -> bool:
 
 
 def _position_same_announcement(store, ticker: str, kind: str, gross: float | None, data_com: date | None, approval: date | None):
-    """Posição do mesmo anúncio, pelo id do sinal gravado.
+    """Posição aberta do mesmo anúncio, pelo id do sinal gravado.
 
-    Não monta a chave com a data-com nem com o protocolo desta leitura: os dois
-    mudam quando outro documento preenche a data. Duas datas-com preenchidas e
-    diferentes seguem como parcelas novas.
+    Só entra `aguardando_compra` e `aberta`. É duplicata quando a data-com
+    coincide ou um dos lados está vazio. Duas datas preenchidas e diferentes
+    são parcelas novas, ainda que o valor e a aprovação sejam os mesmos.
     """
     if gross is None:
         return None
@@ -709,6 +710,7 @@ def _position_same_announcement(store, ticker: str, kind: str, gross: float | No
         FROM positions p
         JOIN signals s ON s.id = p.signal_id
         WHERE s.ticker=? AND s.kind=?
+        AND p.status IN ('aguardando_compra','aberta')
         {clause}
         """,
         params,
@@ -916,10 +918,10 @@ def _commit_buy_then_send(
     cfg, store, report, ticker, company, issuer, kind, gross, net, decision, snap,
     approval, data_com, data_ex, published, time_known, doc, plan, body,
 ) -> bool:
-    """Grava sinal, posição e o alerta como enviado, e só então chama o Telegram.
+    """Grava sinal e posição com o alerta pendente, e só marca enviado depois do Telegram.
 
-    O commit é um só. Se o envio voltar e o processo cair, a próxima varredura
-    acha a posição e não manda outra COMPRA.
+    O commit da posição acontece antes da chamada. Se o Telegram falha, o alerta
+    continua `pendente` e a próxima varredura tenta de novo, sem abrir outra compra.
     """
     signal_id = _insert_signal(
         store, cfg, ticker, company, issuer, kind, gross, net, decision, snap,
@@ -956,17 +958,47 @@ def _commit_buy_then_send(
     )
     anchor = data_com or approval
     key = f"compra|{ticker}|{kind}|{gross:.4f}|{anchor.isoformat() if anchor else ''}"
-    fresh = store.insert_alert(key, "compra", signal_id, body, "sent")
+    fresh = store.insert_alert(key, "compra", signal_id, body, "pendente")
     store.commit()
-    if not fresh:
-        return True
+    if fresh:
+        _deliver_compra(cfg, store, report, key, body)
+    return True
+
+
+def _compra_label(key: str) -> str:
+    parts = key.split("|")
+    if len(parts) >= 2 and parts[0] == "compra":
+        return parts[1]
+    return key
+
+
+def _deliver_compra(cfg: Config, store: Store, report: Report, key: str, body: str) -> bool:
+    """Envia uma COMPRA já gravada. Só vira `sent` depois que o Telegram confirma."""
     try:
         send_message(cfg.token, cfg.chat_id, body)
-    except Exception:
-        log.warning("compra de %s gravada; falha depois do envio", ticker, exc_info=True)
-        raise
+    except Exception as exc:
+        name = type(exc).__name__
+        line = (
+            f"compra pendente {_compra_label(key)}: Telegram falhou ({name}); "
+            "tenta de novo na próxima varredura"
+        )
+        report.errors.append(line)
+        store.log_event("telegram", detail=line)
+        log.warning("%s", line)
+        return False
+    store.mark_alert(key, "sent")
     report.messages.append(body)
     return True
+
+
+def _retry_pending_alerts(cfg: Config, store: Store, report: Report) -> None:
+    """Reenvia COMPRAs que ficaram pendentes. O que o Telegram já confirmou não sai de novo."""
+    if cfg.dry_run:
+        return
+    for row in store.pending_alerts():
+        if row["kind"] != "compra":
+            continue
+        _deliver_compra(cfg, store, report, row["dedupe_key"], row["body"])
 
 
 def _missed_deadline(cfg, store, report, ticker, company, issuer, kind, gross, net, decision, snap, approval, data_com, data_ex, published, time_known, doc) -> bool:

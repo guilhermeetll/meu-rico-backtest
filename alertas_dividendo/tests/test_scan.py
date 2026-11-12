@@ -1635,17 +1635,110 @@ def test_rewritten_data_com_key_still_blocks_the_undated_reread(tmp_path, monkey
         store.close()
 
 
-def test_failure_after_compra_send_does_not_resend(tmp_path, monkeypatch):
-    """O envio volta, a transação ainda aberta é desfeita. A posição já foi commitada."""
+def test_equal_installments_same_approval_both_get_a_buy(tmp_path, monkeypatch):
+    """Mesma aprovação e o mesmo R$/ação, com datas-com diferentes: as duas compram."""
     sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
     store = Store(tmp_path / "alertas.sqlite")
+    store.replace_issuers([("99999", "ZZZZ", "Empresa Teste")])
+    published = datetime(2026, 10, 15, 18, 0, tzinfo=TZ)
+    _notice(
+        store,
+        protocol="1601",
+        cvm="99999",
+        company="Empresa Teste",
+        ticker="ZZZZ3",
+        text=(
+            "Aprovaram dividendos de R$ 0,50 por ação. "
+            "Farão jus os detentores de ações em 30 de outubro de 2026."
+        ),
+        published=published,
+        reference="2026-10-15",
+    )
+    _notice(
+        store,
+        protocol="1602",
+        cvm="99999",
+        company="Empresa Teste",
+        ticker="ZZZZ3",
+        text=(
+            "Aprovaram dividendos de R$ 0,50 por ação. "
+            "Farão jus os detentores de ações em 13 de novembro de 2026."
+        ),
+        published=datetime(2026, 10, 15, 18, 20, tzinfo=TZ),
+        reference="2026-10-15",
+    )
+    store.commit()
+    moment = datetime(2026, 10, 15, 19, 0, tzinfo=TZ)
+    try:
+        report = Report(now=moment, dry_run=False)
+        _scan(_cfg(tmp_path, moment, dry_run=False), store, CAL, report)
+        assert report.errors == []
+        buys = [body for body in sent if "COMPRA —" in body]
+        assert len(buys) == 2
+        assert all(body.startswith("SIMULAÇÃO") for body in buys)
+        assert all("ZZZZ3" in body for body in buys)
+        rows = store.conn.execute(
+            "SELECT data_com, status FROM signals ORDER BY data_com"
+        ).fetchall()
+        assert [row["data_com"] for row in rows] == ["2026-10-30", "2026-11-13"]
+        assert [row["status"] for row in rows] == ["aguardando_compra", "aguardando_compra"]
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM positions").fetchone()["n"] == 2
+        assert store.conn.execute(
+            "SELECT COUNT(*) AS n FROM alerts WHERE kind='compra' AND status='sent'"
+        ).fetchone()["n"] == 2
+        again = Report(now=moment, dry_run=False)
+        _scan(_cfg(tmp_path, moment, dry_run=False), store, CAL, again)
+        assert [body for body in sent if "COMPRA —" in body] == buys
+    finally:
+        store.close()
 
-    def explode(_token, _chat, body):
+
+def test_telegram_failure_stays_pending_and_retries_once(tmp_path, monkeypatch):
+    sent = []
+    calls = {"n": 0}
+
+    def flaky(_token, _chat, body):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("telegram fora")
         sent.append(body)
-        store.conn.rollback()
-        raise RuntimeError("falha depois do envio")
 
-    monkeypatch.setattr("alertas_dividendo.engine.send_message", explode)
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", flaky)
+    store = Store(tmp_path / "alertas.sqlite")
+    published = datetime(2026, 10, 21, 18, 0, tzinfo=TZ)
+    _seed(store, "1587932", "Aprovaram dividendos de R$ 1,00 por ação.", published)
+    moment = datetime(2026, 10, 21, 19, 0, tzinfo=TZ)
+    try:
+        first = Report(now=moment, dry_run=False)
+        _scan(_cfg(tmp_path, moment, dry_run=False), store, CAL, first)
+        assert sent == []
+        assert any("pendente" in line and "Telegram falhou" in line for line in first.errors)
+        assert store.conn.execute("SELECT status FROM positions").fetchone()["status"] == "aguardando_compra"
+        assert store.conn.execute("SELECT status FROM signals").fetchone()["status"] == "aguardando_compra"
+        assert store.conn.execute("SELECT status FROM alerts WHERE kind='compra'").fetchone()["status"] == "pendente"
+        second = Report(now=moment, dry_run=False)
+        _scan(_cfg(tmp_path, moment, dry_run=False), store, CAL, second)
+        assert len(sent) == 1
+        assert sent[0].startswith("SIMULAÇÃO")
+        assert "COMPRA —" in sent[0]
+        assert second.errors == []
+        assert "COMPRA —" in second.messages[0]
+        assert store.conn.execute("SELECT status FROM alerts WHERE kind='compra'").fetchone()["status"] == "sent"
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM positions").fetchone()["n"] == 1
+        third = Report(now=moment, dry_run=False)
+        _scan(_cfg(tmp_path, moment, dry_run=False), store, CAL, third)
+        assert sent == [sent[0]]
+        assert third.messages == []
+        assert store.conn.execute("SELECT COUNT(*) AS n FROM alerts WHERE kind='compra'").fetchone()["n"] == 1
+    finally:
+        store.close()
+
+
+def test_confirmed_compra_is_not_resent(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr("alertas_dividendo.engine.send_message", lambda *args: sent.append(args[-1]))
+    store = Store(tmp_path / "alertas.sqlite")
     published = datetime(2026, 10, 21, 18, 0, tzinfo=TZ)
     _seed(store, "1587932", "Aprovaram dividendos de R$ 1,00 por ação.", published)
     moment = datetime(2026, 10, 21, 19, 0, tzinfo=TZ)
@@ -1655,18 +1748,12 @@ def test_failure_after_compra_send_does_not_resend(tmp_path, monkeypatch):
         assert len(sent) == 1
         assert sent[0].startswith("SIMULAÇÃO")
         assert "COMPRA —" in sent[0]
-        position = store.conn.execute("SELECT status FROM positions").fetchone()
-        assert position["status"] == "aguardando_compra"
-        alert = store.conn.execute("SELECT status FROM alerts WHERE kind='compra'").fetchone()
-        assert alert["status"] == "sent"
-        signal = store.conn.execute("SELECT status FROM signals").fetchone()
-        assert signal["status"] == "aguardando_compra"
-        again = Report(now=moment, dry_run=False)
-        _scan(_cfg(tmp_path, moment, dry_run=False), store, CAL, again)
+        assert store.conn.execute("SELECT status FROM alerts WHERE kind='compra'").fetchone()["status"] == "sent"
+        second = Report(now=moment, dry_run=False)
+        _scan(_cfg(tmp_path, moment, dry_run=False), store, CAL, second)
         assert sent == [sent[0]]
+        assert second.messages == []
         assert store.conn.execute("SELECT COUNT(*) AS n FROM positions").fetchone()["n"] == 1
         assert store.conn.execute("SELECT status FROM positions").fetchone()["status"] == "aguardando_compra"
-        assert store.conn.execute("SELECT status FROM signals").fetchone()["status"] == "aguardando_compra"
-        assert store.conn.execute("SELECT status FROM alerts WHERE kind='compra'").fetchone()["status"] == "sent"
     finally:
         store.close()

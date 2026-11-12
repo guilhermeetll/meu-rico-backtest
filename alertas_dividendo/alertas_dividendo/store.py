@@ -587,6 +587,11 @@ class Store:
     def signal_by_id(self, signal_id: int) -> sqlite3.Row:
         return self.conn.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
 
+    def pending_alerts(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM alerts WHERE status='pendente' ORDER BY created_at, dedupe_key"
+        ).fetchall()
+
     def alert_exists(self, key: str) -> bool:
         row = self.conn.execute(
             "SELECT 1 FROM alerts WHERE dedupe_key=? AND status IN ('reserved','sent','uncertain')",
