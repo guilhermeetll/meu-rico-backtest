@@ -77,11 +77,11 @@ TELEGRAM_CHAT_ID=coloque_o_chat
 55 16 * * 1-5 cd /opt/alertas_dividendo && /opt/alertas_dividendo/.venv/bin/python -m alertas_dividendo exit-reminder
 ```
 
-O `scheduler.py` do servidor fica fora deste repositório. Ele precisa do job
-das 9h com `python -m alertas_dividendo entry-reminder`, ao lado do
-`exit-reminder` das 16:55, e de um `run` extra às 16:25 nos dias úteis. O
-`run` das 8h também cai na janela do lembrete de entrada (8:00 inclusive até
-10:00) e o aviso sai uma vez só.
+No servidor o cron não existe. A agenda que roda lá está em
+`deploy/scheduler.py`: `run` de hora em hora das 8h às 23h, `entry-reminder`
+às 9:00, `run` extra às 16:25 e `exit-reminder` às 16:00, 16:55, 17:00 e
+17:55, só de segunda a sexta. O `run` das 8h também cai na janela do lembrete
+de entrada (8:00 inclusive até 10:00) e o aviso sai uma vez só.
 
 O `run` das 16:25 usa o mesmo comando. Não há subcomando novo. 16:25 ainda é
 antes do corte das 16:30, então um aviso entregue mais cedo e visto nessa
@@ -106,6 +106,58 @@ por posição por dia. Um sinal cujo prazo de compra já passou — fechamento �
 16:30 ou abertura às 10:00 (13:00 na Cinzas), com valor lido ou em “conferir
 valor” — é ignorado (`prazo de compra já passou`) e não abre posição nem
 manda alerta. O comando não compra nem vende de verdade: só avisa.
+
+## Deploy no servidor
+
+Os scripts do box ficam em `deploy/` e são executados a partir da pasta do
+bot, não de dentro de `deploy/`. Essa pasta é `ALERTAS_BASE_DIR`, com padrão
+`/workspace/alertas-dividendo`. `run.sh` faz `source` de `token.env` e
+`chat_id.env` nessa pasta (`TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID`). Esses
+arquivos não entram no git: `*.env` está no `.gitignore`.
+
+```text
+$ALERTAS_BASE_DIR/
+  run.sh
+  scheduler.py
+  start_scheduler.sh
+  token.env
+  chat_id.env
+  venv-alertas/
+  data/
+  app/alertas_dividendo/    # este pacote, com requirements.txt
+```
+
+`run.sh` usa `flock -w 1200` em `$ALERTAS_BASE_DIR/.lock`, exporta
+`ALERTAS_SIMULACAO=1` e `TZ=America/Sao_Paulo` e chama
+`python -m alertas_dividendo`. O venv é `venv-alertas`, sem ponto no nome,
+porque a troca da máquina apaga pasta que começa com ponto. Se
+`venv-alertas/bin/python` não existir, o `run.sh` recria o venv e instala o
+`requirements.txt` pinado, ainda segurando o mesmo lock. Se o
+`python3 -m venv` ou o `pip install` falhar, a falha vai para `cron.log` e o
+script sai com erro, sem chamar o Python.
+
+Na troca da máquina, a partir da pasta `alertas_dividendo` do checkout:
+
+```bash
+BASE="${ALERTAS_BASE_DIR:-/workspace/alertas-dividendo}"
+cp deploy/run.sh deploy/scheduler.py deploy/start_scheduler.sh "$BASE/"
+chmod +x "$BASE/run.sh" "$BASE/start_scheduler.sh"
+# token.env e chat_id.env ficam só em $BASE; o código em $BASE/app/alertas_dividendo
+"$BASE/start_scheduler.sh"
+```
+
+Exporte `ALERTAS_BASE_DIR` antes do `start_scheduler.sh` quando a pasta não
+for a padrão. O script não sobe outro processo se o scheduler já estiver
+rodando. Para passar a usar um `scheduler.py` novo, encerre o antigo e chame
+de novo:
+
+```bash
+pkill -f "$BASE/scheduler.py" || true
+"$BASE/start_scheduler.sh"
+```
+
+Um `venv-alertas` que já existe não é reinstalado. Para reconstruir com as
+versões pinadas, apague essa pasta e deixe o próximo `run.sh` criar outra.
 
 ## De onde vêm os documentos
 
