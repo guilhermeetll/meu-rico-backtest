@@ -8,3 +8,4 @@ data/b3_ticks/
 data/b3_ticks_meta/
 data/b3_bars/
 .env
+*.env

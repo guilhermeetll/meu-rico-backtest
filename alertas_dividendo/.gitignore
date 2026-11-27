@@ -4,5 +4,7 @@ __pycache__/
 *.pyc
 alertas_data/
 .env
+*.env
+venv-alertas/
 *.sqlite
 *.sqlite-journal
